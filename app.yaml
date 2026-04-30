@@ -1,0 +1,45 @@
+command:
+  - "bash"
+  - "-c"
+  - |
+    # -- Install system-level dependencies --
+    apt-get update -qq && apt-get install -y -qq wget > /dev/null 2>&1
+
+    # -- Install Miniforge (conda/mamba) if not present --
+    if [ ! -f /tmp/miniforge/bin/mamba ]; then
+      wget -qnc https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+      bash Miniforge3-Linux-x86_64.sh -bfp /tmp/miniforge
+    fi
+    export PATH="/tmp/miniforge/bin:$PATH"
+
+    # -- Install core MD packages via mamba (faster + binary deps) --
+    # rdkit is required by ProLIF and must be installed via conda/mamba
+    mamba install -c conda-forge python=3.12 mdanalysis mdtraj rdkit -y -q
+
+    # -- Install pip packages from requirements.txt --
+    pip install -q -r requirements.txt
+
+    # -- Install ermsfkit from GitHub --
+    pip install -q git+https://github.com/pablo-arantes/ermsfkit.git
+
+    # -- Add miniforge site-packages to PYTHONPATH --
+    export PYTHONPATH="$(find /tmp/miniforge/lib -name site-packages -type d | head -1):$PYTHONPATH"
+
+    # -- Launch Streamlit --
+    streamlit run app.py --server.port 8000 --server.headless true
+
+env:
+  - name: STREAMLIT_THEME_BASE
+    value: "light"
+  - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+    value: "false"
+  - name: STREAMLIT_SERVER_MAX_UPLOAD_SIZE
+    value: "2000"
+
+description: |
+  PepIntProt (PIP) v2.0 - Peptide-Protein Interaction Analysis
+  Upload your trajectory + topology files and get comprehensive analyses:
+  RMSD, RMSF, Rg, PCA, DSSP, Distance, Contact, ProLIF, eRMSF,
+  Free Energy Landscape + representative frame extraction, Interaction Energy.
+  AI-powered PDF reports via Claude (Databricks/Anthropic) or Qwen.
+  Results exported as plots + CSV in a single ZIP download.

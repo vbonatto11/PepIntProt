@@ -1,0 +1,32 @@
+# PepIntProt (PIP) v4.0 - Peptide-Protein Interaction Analysis
+# Core dependencies
+streamlit>=1.30.0
+numpy>=1.24.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+scipy>=1.10.0
+
+# MD Analysis packages
+MDAnalysis>=2.6.0
+mdtraj>=1.10.0
+prolif>=2.1.0
+
+# Force field topology parsing (for accurate interaction energy)
+parmed>=4.0.0
+
+# PDF report generation
+fpdf2>=2.7.0
+
+# LLM providers — AI report generation
+anthropic>=0.30.0
+groq>=0.9.0
+google-generativeai>=0.8.0
+openai>=1.0.0
+requests>=2.31.0
+
+# Databricks Foundation Model API (auto-auth + OpenAI-compatible client)
+databricks-sdk[openai]>=0.30.0
+
+# eRMSF (ensemble RMSF)
+# Installed separately in app.yaml: pip install git+https://github.com/pablo-arantes/ermsfkit.git
