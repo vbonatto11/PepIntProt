@@ -227,7 +227,7 @@ If you use PepIntProt in your research, please cite:
 @software{pepintprot2025,
   title = {PepIntProt (PIP): Peptide-Protein Interaction Profiler from Molecular Dynamics Simulations},
   year = {2025},
-  url = {https://github.com/YOUR_USERNAME/PepIntProt}
+  url = {https://github.com/vbonatto11/PepIntProt}
 }
 ```
 
