@@ -186,7 +186,7 @@ The `PepIntProt_Colab.ipynb` notebook provides the same analyses in a Google Col
 - AI report supports Groq (free), OpenAI, Google Gemini, and Anthropic (API key required)
 - Works with free Colab tier (no GPU required)
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_USERNAME/PepIntProt/blob/main/PepIntProt_Colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vbonatto11/PepIntProt/blob/main/PepIntProt_Colab.ipynb)
 
 ---
 
