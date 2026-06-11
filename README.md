@@ -67,7 +67,7 @@
 
 ```bash
 # Clone
-git clone https://github.com/YOUR_USERNAME/PepIntProt.git
+git clone https://github.com/vbonatto11/PepIntProt.git
 cd PepIntProt
 
 # Create conda environment (recommended for MDAnalysis)

@@ -1,0 +1,726 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC <p align="center">  <img src="https://raw.githubusercontent.com/vbonatto11/PepIntProt/main/logov1.png" width="150"></p># 🧬 PepIntProt (PIP) v4.0 — Google Colab Edition**Peptide–Protein Interaction Profiler from Molecular Dynamics Simulations**This notebook provides the same analyses as the Streamlit app, adapted for Google Colab.All code cells are **hidden by default** — expand them if you want to inspect or modify the code.**How to use:**1. Run each cell in order (Shift+Enter or ▶️ button)2. Configure parameters in the forms that appear3. Upload your files when prompted4. Download results when complete---
+
+# COMMAND ----------
+
+#@title 1. 📦 Install Dependencies { display-mode: "form" }
+#@markdown This cell installs all required packages. Takes ~3-5 minutes on first run.
+
+import subprocess, sys
+
+packages = [
+    "MDAnalysis",
+    "mdtraj",
+    "prolif",
+    "fpdf2",
+    "seaborn",
+    "parmed",
+    "anthropic",
+    "openai",
+    "groq",
+    "google-generativeai",
+]
+
+# Install ermsfkit from GitHub
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
+    "git+https://github.com/pablo-arantes/ermsfkit.git"])
+
+for pkg in packages:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pkg])
+
+print("✅ All dependencies installed!")
+
+
+# COMMAND ----------
+
+#@title 2. 📚 Import Libraries { display-mode: "form" }
+#@markdown Importing all required libraries...
+
+import os, sys, warnings, io, zipfile, tempfile, glob, time, base64, datetime
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import seaborn as sns
+from statistics import mean, stdev
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.colors import ListedColormap, BoundaryNorm
+from scipy.ndimage import gaussian_filter as _gaussian_filter
+from IPython.display import display, HTML, Image, clear_output
+from google.colab import files
+
+warnings.filterwarnings("ignore")
+
+import MDAnalysis as mda
+from MDAnalysis.analysis import rms, align, distances
+from MDAnalysis.analysis.rms import RMSF as MDA_RMSF
+from MDAnalysis.lib.distances import distance_array
+from MDAnalysis.topology.guessers import guess_types, guess_masses
+
+try:
+    from fpdf import FPDF
+    HAS_FPDF = True
+except ImportError:
+    HAS_FPDF = False
+
+try:
+    import parmed as _parmed
+    HAS_PARMED = True
+except ImportError:
+    HAS_PARMED = False
+
+try:
+    import anthropic as _anthropic
+    HAS_ANTHROPIC = True
+except ImportError:
+    HAS_ANTHROPIC = False
+
+try:
+    from openai import OpenAI as _OpenAI
+    HAS_OPENAI = True
+except ImportError:
+    HAS_OPENAI = False
+
+try:
+    from groq import Groq as _Groq
+    HAS_GROQ = True
+except ImportError:
+    HAS_GROQ = False
+
+try:
+    import google.generativeai as _genai
+    HAS_GENAI = True
+except ImportError:
+    HAS_GENAI = False
+
+# Output directory
+OUT_DIR = "/content/PepIntProt_results"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+print(f"✅ Libraries imported! MDAnalysis {mda.__version__}")
+print(f"   parmed: {HAS_PARMED}, fpdf2: {HAS_FPDF}, groq: {HAS_GROQ}, gemini: {HAS_GENAI}")
+
+
+# COMMAND ----------
+
+#@title 3. ⚙️ Helper Functions { display-mode: "form" }
+#@markdown Core analysis and utility functions (hidden).
+
+def detect_chains(u):
+    chain_info = []
+    try:
+        chain_ids = sorted(set(cid for cid in u.atoms.chainIDs if cid.strip()))
+        if len(chain_ids) >= 2:
+            for cid in chain_ids:
+                atoms = u.select_atoms(f"chainID {cid}")
+                prot = atoms.select_atoms("protein or resname ACE NME")
+                if len(prot) > 0:
+                    resids = sorted(set(prot.resids))
+                    chain_info.append(dict(id=cid, sel_prefix="chainID",
+                        n_residues=len(resids), resids=resids,
+                        first_resid=min(resids), last_resid=max(resids)))
+    except Exception:
+        pass
+    if len(chain_info) < 2:
+        chain_info = []
+        prot = u.select_atoms("protein or resname ACE NME")
+        resids = sorted(set(prot.resids))
+        chains, cur = [], [resids[0]]
+        for i in range(1, len(resids)):
+            if resids[i] - resids[i-1] > 1:
+                chains.append(cur); cur = [resids[i]]
+            else:
+                cur.append(resids[i])
+        chains.append(cur)
+        for idx, cr in enumerate(chains):
+            chain_info.append(dict(id=str(idx+1), sel_prefix="resid",
+                n_residues=len(cr), resids=cr,
+                first_resid=min(cr), last_resid=max(cr)))
+    if len(chain_info) < 2:
+        raise ValueError("Need >= 2 chains. Use manual selections.")
+    chain_info.sort(key=lambda x: x["n_residues"])
+    pep, prot = chain_info[0], chain_info[-1]
+    pf = pep["sel_prefix"]
+    if pf == "chainID":
+        return f"chainID {pep['id']}", f"chainID {prot['id']}", pep, prot
+    return (f"resid {pep['first_resid']}:{pep['last_resid']}",
+            f"resid {prot['first_resid']}:{prot['last_resid']}", pep, prot)
+
+def make_time_array(n_frames, simulation_time_ns):
+    return np.linspace(0, simulation_time_ns, n_frames)
+
+def save_and_show(fig, label, out_dir=OUT_DIR):
+    path = os.path.join(out_dir, f"{label}.png")
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+
+def call_llm_colab(prompt, provider, model, api_key="", max_tokens=4096):
+    """Multi-provider LLM call for Colab (no vision — text only)."""
+    if provider == "anthropic":
+        if not HAS_ANTHROPIC:
+            raise ImportError("anthropic not installed")
+        client = _anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=model, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}])
+        return response.content[0].text
+    elif provider == "groq":
+        if not HAS_GROQ:
+            raise ImportError("groq not installed. Run: pip install groq")
+        client = _Groq(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}])
+        return response.choices[0].message.content
+    elif provider == "openai":
+        if not HAS_OPENAI:
+            raise ImportError("openai not installed. Run: pip install openai")
+        client = _OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}])
+        return response.choices[0].message.content
+    elif provider == "gemini":
+        if not HAS_GENAI:
+            raise ImportError("google-generativeai not installed")
+        _genai.configure(api_key=api_key)
+        gmodel = _genai.GenerativeModel(model)
+        response = gmodel.generate_content(
+            prompt, generation_config={"max_output_tokens": max_tokens})
+        return response.text
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+
+print("✅ Helper functions defined!")
+
+
+# COMMAND ----------
+
+#@title 4. 📁 Upload Files { display-mode: "form" }
+#@markdown Upload your MD simulation files.
+
+system_type = "Holo (Peptide + Protein)" #@param ["Holo (Peptide + Protein)", "APO Protein", "APO Peptide"]
+is_holo = system_type.startswith("Holo")
+
+print("📂 Upload your TOPOLOGY PDB file:")
+top_uploaded = files.upload()
+top_name = list(top_uploaded.keys())[0]
+top_path = os.path.join("/content", top_name)
+
+print("\n📂 Upload your TRAJECTORY file (DCD / XTC / TRR / NC / PDB):")
+traj_uploaded = files.upload()
+traj_name = list(traj_uploaded.keys())[0]
+traj_path = os.path.join("/content", traj_name)
+
+plf_path = None
+ff_path = None
+
+if is_holo:
+    upload_prolif = False #@param {type:"boolean"}
+    if upload_prolif:
+        print("\n📂 Upload ProLIF topology (optional):")
+        plf_uploaded = files.upload()
+        plf_name = list(plf_uploaded.keys())[0]
+        plf_path = os.path.join("/content", plf_name)
+
+    upload_ff = False #@param {type:"boolean"}
+    if upload_ff:
+        print("\n📂 Upload FF topology for Interaction Energy (optional):")
+        ff_uploaded = files.upload()
+        ff_name = list(ff_uploaded.keys())[0]
+        ff_path = os.path.join("/content", ff_name)
+
+print(f"\n✅ Files uploaded!")
+print(f"   Topology: {top_name}")
+print(f"   Trajectory: {traj_name}")
+if plf_path: print(f"   ProLIF: {os.path.basename(plf_path)}")
+if ff_path: print(f"   FF: {os.path.basename(ff_path)}")
+
+
+# COMMAND ----------
+
+#@title 5. ⚙️ Configure Analysis Parameters { display-mode: "form" }
+#@markdown Set simulation parameters and select analyses.
+
+simulation_time_ns = 500.0 #@param {type:"number"}
+auto_detect_chains = True #@param {type:"boolean"}
+
+#@markdown --- **Chain Selection (if auto-detect is OFF)** ---
+manual_peptide_sel = "chainID A" #@param {type:"string"}
+manual_protein_sel = "chainID B" #@param {type:"string"}
+
+#@markdown --- **Contact Analysis (Holo only)** ---
+contact_cutoff = 5.0 #@param {type:"slider", min:3.0, max:10.0, step:0.5}
+
+#@markdown --- **eRMSF** ---
+ermsf_skip = 10 #@param {type:"slider", min:2, max:50, step:1}
+ermsf_vmin = 0.0 #@param {type:"number"}
+ermsf_vmax = 4.0 #@param {type:"number"}
+
+#@markdown --- **Free Energy Landscape** ---
+fel_temperature = 300.0 #@param {type:"number"}
+fel_bins = 50 #@param {type:"slider", min:30, max:100, step:5}
+
+#@markdown --- **ProLIF (Holo only)** ---
+prolif_top_n = 20 #@param {type:"slider", min:5, max:40, step:1}
+prolif_frame_skip = 1 #@param [1, 2, 5, 10, 20, 50]
+prolif_frame_skip = int(prolif_frame_skip)
+
+#@markdown --- **Select Analyses** ---
+run_3d_viz = True #@param {type:"boolean"}
+run_rmsd = True #@param {type:"boolean"}
+run_rmsf = True #@param {type:"boolean"}
+run_rg = True #@param {type:"boolean"}
+run_pca = True #@param {type:"boolean"}
+run_dssp = True #@param {type:"boolean"}
+run_distance = True #@param {type:"boolean"}
+run_contact = True #@param {type:"boolean"}
+run_prolif = True #@param {type:"boolean"}
+run_ermsf = True #@param {type:"boolean"}
+run_fel = True #@param {type:"boolean"}
+run_ie = True #@param {type:"boolean"}
+
+# Build analyses list
+analyses = []
+if run_3d_viz: analyses.append("3D Visualization")
+if run_rmsd: analyses.append("RMSD")
+if run_rmsf: analyses.append("RMSF")
+if run_rg: analyses.append("Radius of Gyration")
+if run_pca: analyses.append("PCA")
+if run_dssp: analyses.append("DSSP")
+if is_holo:
+    if run_distance: analyses.append("Distance")
+    if run_contact: analyses.append("Contact")
+    if run_prolif: analyses.append("ProLIF")
+if run_ermsf: analyses.append("eRMSF")
+if run_fel: analyses.append("Free Energy Landscape")
+if is_holo and run_ie: analyses.append("Interaction Energy")
+
+print(f"✅ Configuration set!")
+print(f"   System: {system_type}")
+print(f"   Simulation: {simulation_time_ns} ns")
+print(f"   Analyses ({len(analyses)}): {', '.join(analyses)}")
+
+
+# COMMAND ----------
+
+#@title 6. 🚀 Run Analysis { display-mode: "form" }
+#@markdown Execute all selected analyses. This may take several minutes.
+
+import time as _time
+_start = _time.time()
+
+# Clean output directory
+for f in os.listdir(OUT_DIR):
+    os.remove(os.path.join(OUT_DIR, f))
+
+# Load universe
+print("Loading trajectory...")
+u = mda.Universe(top_path, traj_path)
+if np.all(u.atoms.masses == 0):
+    u.atoms.types = guess_types(u.atoms.names)
+    u.atoms.masses = guess_masses(u.atoms.types)
+
+n_frames = len(u.trajectory)
+n_atoms = len(u.atoms)
+time_array = make_time_array(n_frames, simulation_time_ns)
+sim_ns = time_array[-1]
+
+# Chain detection
+if is_holo:
+    if auto_detect_chains:
+        peptide_sel, protein_sel, peptide_info, protein_info = detect_chains(u)
+    else:
+        peptide_sel, protein_sel = manual_peptide_sel, manual_protein_sel
+        pep_a = u.select_atoms(peptide_sel)
+        prot_a = u.select_atoms(protein_sel)
+        peptide_info = dict(n_residues=len(set(pep_a.resids)),
+            first_resid=int(min(pep_a.resids)), last_resid=int(max(pep_a.resids)))
+        protein_info = dict(n_residues=len(set(prot_a.resids)),
+            first_resid=int(min(prot_a.resids)), last_resid=int(max(prot_a.resids)))
+else:
+    _apo_atoms = u.select_atoms("protein or resname ACE NME")
+    _apo_resids = sorted(set(_apo_atoms.resids))
+    _apo_sel = f"resid {min(_apo_resids)}:{max(_apo_resids)}"
+    _apo_info = dict(n_residues=len(_apo_resids),
+        first_resid=min(_apo_resids), last_resid=max(_apo_resids))
+    peptide_sel = _apo_sel
+    protein_sel = _apo_sel
+    peptide_info = _apo_info
+    protein_info = _apo_info
+
+pep_ca = f"({peptide_sel}) and name CA"
+prot_ca = f"({protein_sel}) and name CA"
+cx_ca = f"(({peptide_sel}) or ({protein_sel})) and name CA"
+pep_all = f"({peptide_sel}) and (protein or resname ACE NME)"
+prot_all = f"({protein_sel}) and (protein or resname ACE NME)"
+
+# Display labels
+if is_holo and peptide_info["n_residues"] > 40:
+    _pep_label = "Protein"
+    _prot_label = "Protein Target"
+    _system_interaction = "Protein\u2013Protein Target"
+elif is_holo:
+    _pep_label = "Peptide"
+    _prot_label = "Protein Target"
+    _system_interaction = "Peptide\u2013Protein Target"
+else:
+    _pep_label = "Protein" if system_type == "APO Protein" else "Peptide"
+    _prot_label = _pep_label
+    _system_interaction = f"APO {_pep_label}"
+
+# ── Display labels: if "peptide" chain > 40 residues, label as protein ──
+if is_holo and peptide_info["n_residues"] > 40:
+    _pep_label = "Protein"
+    _prot_label = "Protein Target"
+    _system_interaction = "Protein\u2013Protein Target"
+elif is_holo:
+    _pep_label = "Peptide"
+    _prot_label = "Protein Target"
+    _system_interaction = "Peptide\u2013Protein Target"
+else:
+    _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
+    _pep_label = _apo_lbl
+    _prot_label = _apo_lbl
+    _system_interaction = f"APO {_apo_lbl}"
+print(f"  Labels: {_pep_label} / {_prot_label}")
+
+# ── Display labels: if "peptide" chain > 40 residues, label as protein ──
+if is_holo and peptide_info["n_residues"] > 40:
+    _pep_label = "Protein"
+    _prot_label = "Protein Target"
+    _system_interaction = "Protein\u2013Protein Target"
+elif is_holo:
+    _pep_label = "Peptide"
+    _prot_label = "Protein Target"
+    _system_interaction = "Peptide\u2013Protein Target"
+else:
+    _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
+    _pep_label = _apo_lbl
+    _prot_label = _apo_lbl
+    _system_interaction = f"APO {_apo_lbl}"
+print(f"  Labels: {_pep_label} / {_prot_label}")
+
+# ── Global alignment to frame 0 (handles unaligned trajectories) ──
+print("Aligning trajectory to first frame...")
+align.AlignTraj(u, u, select=cx_ca, ref_frame=0, in_memory=True).run()
+u.trajectory[0]  # Reset to first frame after alignment
+print("✅ Trajectory aligned.")
+
+
+print(f"\n{'='*60}")
+print(f"  System: {n_atoms} atoms, {n_frames} frames, {sim_ns:.0f} ns")
+if is_holo:
+    print(f"  Peptide: {peptide_sel} ({peptide_info['n_residues']} res)")
+    print(f"  Protein: {protein_sel} ({protein_info['n_residues']} res)")
+else:
+    _lbl = "Protein" if system_type == "APO Protein" else "Peptide"
+    print(f"  APO {_lbl}: {peptide_sel} ({peptide_info['n_residues']} res)")
+print(f"{'='*60}\n")
+
+report_data = {"system": {"n_atoms": n_atoms, "n_frames": n_frames,
+    "simulation_ns": sim_ns, "peptide_sel": peptide_sel,
+    "protein_sel": protein_sel, "peptide_n_res": peptide_info["n_residues"],
+    "protein_n_res": protein_info["n_residues"]},
+    "analyses": {}, "plots": {}}
+
+# ════════════════════════════════════════════════════
+# RMSD
+# ════════════════════════════════════════════════════
+if "RMSD" in analyses:
+    print("📊 Computing RMSD...")
+    rmsd_data = {}
+    if is_holo:
+        _items = [(_prot_label, prot_ca, "#2196F3"), (_pep_label, pep_ca, "#E91E63"), ("Complex", cx_ca, "#4CAF50")]
+    else:
+        _lbl = "Protein" if system_type == "APO Protein" else "Peptide"
+        _col = "#2196F3" if system_type == "APO Protein" else "#E91E63"
+        _items = [(_lbl, cx_ca, _col)]
+    for lbl, sel, col in _items:
+        R = rms.RMSD(u, u, select=sel, ref_frame=0); R.run()
+        rmsd_data[lbl] = {"values": R.results.rmsd[:, 2], "color": col}
+    _n = len(rmsd_data)
+    fig, axes = plt.subplots(_n, 1, figsize=(10, max(4, _n*3)), sharex=True, squeeze=False)
+    for ax, (lbl, d) in zip(axes.flatten(), rmsd_data.items()):
+        ax.plot(time_array, d["values"], alpha=.7, color=d["color"], lw=.8)
+        ax.set_ylabel("RMSD (Å)"); ax.set_title(lbl, fontweight="bold"); ax.set_xlim(0, sim_ns)
+    axes.flatten()[-1].set_xlabel("Time (ns)")
+    fig.tight_layout()
+    save_and_show(fig, "rmsd_all")
+    for lbl, d in rmsd_data.items():
+        v = d["values"]
+        print(f"   {lbl}: {mean(v):.2f} ± {stdev(v):.2f} Å")
+    pd.DataFrame({"Time_ns": time_array, **{f"RMSD_{k}": v["values"] for k, v in rmsd_data.items()}}).to_csv(
+        os.path.join(OUT_DIR, "rmsd_data.csv"), index=False)
+
+# ════════════════════════════════════════════════════
+# RMSF
+# ════════════════════════════════════════════════════
+if "RMSF" in analyses:
+    print("📊 Computing RMSF...")
+    avg_s = align.AverageStructure(u, u, select=cx_ca, ref_frame=0).run()
+    align.AlignTraj(u, avg_s.results.universe, select=cx_ca, in_memory=True).run()
+    all_ca = u.select_atoms(cx_ca)
+    rmsf_vals = MDA_RMSF(all_ca).run().results.rmsf
+    res_idx = np.arange(len(rmsf_vals))
+    fig, ax = plt.subplots(figsize=(14, 5))
+    if is_holo:
+        pep_a = u.select_atoms(pep_ca); prot_a = u.select_atoms(prot_ca)
+        r2i = {r: i for i, r in enumerate(all_ca.resids)}
+        rp = [rmsf_vals[r2i[r]] for r in sorted(set(pep_a.resids)) if r in r2i]
+        rr = [rmsf_vals[r2i[r]] for r in sorted(set(prot_a.resids)) if r in r2i]
+        b = len(rp)
+        ax.plot(res_idx[:b], rp, color="#E91E63", lw=1.2, label="Peptide")
+        ax.plot(res_idx[b:b+len(rr)], rr, color="#2196F3", lw=1.2, label="Protein")
+        ax.fill_between(res_idx[:b], rp, alpha=0.15, color="#E91E63")
+        ax.fill_between(res_idx[b:b+len(rr)], rr, alpha=0.15, color="#2196F3")
+        ax.axvline(x=b-0.5, color="k", ls="--", lw=1.5, alpha=0.8)
+    else:
+        _col = "#2196F3" if system_type == "APO Protein" else "#E91E63"
+        ax.plot(res_idx, rmsf_vals, color=_col, lw=1.2)
+        ax.fill_between(res_idx, rmsf_vals, alpha=0.15, color=_col)
+    ax.set_xlabel("Residue Index", fontsize=13, fontweight="bold")
+    ax.set_ylabel("RMSF (Å)", fontsize=13, fontweight="bold")
+    ax.set_xlim(0, len(rmsf_vals)-1); ax.legend(); fig.tight_layout()
+    save_and_show(fig, "rmsf_combined")
+
+# ════════════════════════════════════════════════════
+# Radius of Gyration
+# ════════════════════════════════════════════════════
+if "Radius of Gyration" in analyses:
+    print("📊 Computing Radius of Gyration...")
+    if is_holo:
+        _items = [(_prot_label, prot_all, "#2196F3"), (_pep_label, pep_all, "#E91E63"), ("Complex", cx_ca, "#4CAF50")]
+    else:
+        _lbl = "Protein" if system_type == "APO Protein" else "Peptide"
+        _items = [(_lbl, cx_ca, "#2196F3" if system_type == "APO Protein" else "#E91E63")]
+    rg_data = {}
+    for lbl, sel, col in _items:
+        atoms = u.select_atoms(sel)
+        vals = np.array([atoms.radius_of_gyration() for _ in u.trajectory])
+        rg_data[lbl] = {"values": vals, "color": col}
+    _n = len(rg_data)
+    fig, axes = plt.subplots(_n, 1, figsize=(10, max(4, _n*3)), sharex=True, squeeze=False)
+    for ax, (lbl, d) in zip(axes.flatten(), rg_data.items()):
+        ax.plot(time_array, d["values"], alpha=.7, color=d["color"], lw=.8)
+        ax.set_ylabel("Rg (Å)"); ax.set_title(lbl, fontweight="bold"); ax.set_xlim(0, sim_ns)
+    axes.flatten()[-1].set_xlabel("Time (ns)")
+    fig.tight_layout()
+    save_and_show(fig, "rg_all")
+    pd.DataFrame({"Time_ns": time_array, **{f"Rg_{k}": v["values"] for k, v in rg_data.items()}}).to_csv(
+        os.path.join(OUT_DIR, "rg_data.csv"), index=False)
+
+# ════════════════════════════════════════════════════
+# PCA
+# ════════════════════════════════════════════════════
+if "PCA" in analyses:
+    print("📊 Computing PCA...")
+    from MDAnalysis.analysis.pca import PCA as MDA_PCA
+    if is_holo:
+        _items = [(_prot_label, prot_ca, "#2196F3"), (_pep_label, pep_ca, "#E91E63"), ("Complex", cx_ca, "#4CAF50")]
+    else:
+        _lbl = "Protein" if system_type == "APO Protein" else "Peptide"
+        _items = [(_lbl, cx_ca, "#2196F3" if system_type == "APO Protein" else "#E91E63")]
+    for lbl, sel, col in _items:
+        atoms = u.select_atoms(sel)
+        pca = MDA_PCA(u, select=sel).run()
+        tr = pca.transform(atoms, n_components=3)
+        var = pca.results.variance; vr = var / var.sum() * 100
+        fig, ax = plt.subplots(figsize=(8, 6))
+        sc = ax.scatter(tr[:, 0], tr[:, 1], c=time_array, cmap="plasma", s=8, alpha=.7)
+        plt.colorbar(sc, ax=ax, label="Time (ns)")
+        ax.set_xlabel(f"PC1 ({vr[0]:.1f}%)"); ax.set_ylabel(f"PC2 ({vr[1]:.1f}%)")
+        ax.set_title(f"PCA — {lbl}", fontweight="bold"); fig.tight_layout()
+        save_and_show(fig, f"pca_{lbl.lower()}")
+
+# ════════════════════════════════════════════════════
+# DSSP
+# ════════════════════════════════════════════════════
+if "DSSP" in analyses:
+    print("📊 Computing DSSP...")
+    try:
+        import mdtraj
+        traj_full = mdtraj.load(traj_path, top=top_path)
+        _prot_idx = traj_full.topology.select("protein")
+        traj = traj_full.atom_slice(_prot_idx)
+        dssp_all = mdtraj.compute_dssp(traj, simplified=True)
+        ss_map = {"H": 0, "E": 1, "C": 2, "NA": 3}
+        dssp_num = np.vectorize(lambda x: ss_map.get(x, 3))(dssp_all)
+        cmap_ss = ListedColormap(["#E91E63", "#2196F3", "#BDBDBD", "#EEEEEE"])
+        norm_ss = BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], cmap_ss.N)
+        mt_chains = [c for c in traj.topology.chains if c.n_residues > 0]
+        mt_chains.sort(key=lambda c: c.n_residues)
+        if is_holo and len(mt_chains) >= 2:
+            for chain, label in [(mt_chains[0], "Peptide"), (mt_chains[-1], "Protein")]:
+                idx = [r.index for r in chain.residues]
+                labels = [f"{r.name}{r.resSeq}" for r in chain.residues]
+                fig, ax = plt.subplots(figsize=(14, max(3, len(idx)*0.15)))
+                ax.imshow(dssp_num[:, idx].T, aspect="auto", cmap=cmap_ss, norm=norm_ss,
+                          interpolation="nearest", origin="lower", extent=[0, sim_ns, -0.5, len(idx)-0.5])
+                ax.set_xlabel("Time (ns)"); ax.set_ylabel("Residue")
+                ax.set_title(f"DSSP — {label}", fontweight="bold"); fig.tight_layout()
+                save_and_show(fig, f"dssp_{label.lower()}")
+        else:
+            chain = mt_chains[-1]
+            idx = [r.index for r in chain.residues]
+            _lbl = "Protein" if system_type == "APO Protein" else "Peptide"
+            fig, ax = plt.subplots(figsize=(14, max(4, len(idx)*0.08)))
+            ax.imshow(dssp_num[:, idx].T, aspect="auto", cmap=cmap_ss, norm=norm_ss,
+                      interpolation="nearest", origin="lower", extent=[0, sim_ns, -0.5, len(idx)-0.5])
+            ax.set_xlabel("Time (ns)"); ax.set_ylabel("Residue")
+            ax.set_title(f"DSSP — APO {_lbl}", fontweight="bold"); fig.tight_layout()
+            save_and_show(fig, f"dssp_{_lbl.lower()}")
+    except Exception as e:
+        print(f"   ⚠️ DSSP failed: {e}")
+
+# ════════════════════════════════════════════════════
+# Distance (Holo only)
+# ════════════════════════════════════════════════════
+if "Distance" in analyses:
+    print("📊 Computing Distance...")
+    pep_grp = u.select_atoms(pep_all); prot_grp = u.select_atoms(prot_all)
+    dists = np.array([np.linalg.norm(pep_grp.center_of_mass() - prot_grp.center_of_mass()) for _ in u.trajectory])
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(time_array, dists, color="#9C27B0", lw=.8, alpha=.7)
+    ax.set_xlabel("Time (ns)"); ax.set_ylabel("Distance (Å)")
+    ax.set_title("Peptide–Protein COM Distance", fontweight="bold"); ax.set_xlim(0, sim_ns)
+    fig.tight_layout()
+    save_and_show(fig, "distance_com")
+    print(f"   Mean: {mean(dists):.2f} ± {stdev(dists):.2f} Å")
+
+# ════════════════════════════════════════════════════
+# Free Energy Landscape
+# ════════════════════════════════════════════════════
+if "Free Energy Landscape" in analyses:
+    print("📊 Computing Free Energy Landscape...")
+    R_f = rms.RMSD(u, u, select=cx_ca, ref_frame=0); R_f.run()
+    rmsd_f = R_f.results.rmsd[:, 2]
+    cx_f = u.select_atoms(cx_ca)
+    rg_f = np.array([cx_f.radius_of_gyration() for _ in u.trajectory])
+    kB = 0.001987; RT = kB * fel_temperature
+    hist, xe, ye = np.histogram2d(rmsd_f, rg_f, bins=fel_bins)
+    hp = hist / np.sum(hist); hp[hp == 0] = np.min(hp[hp > 0]) * 0.01
+    fel = -RT * np.log(hp); fel -= np.min(fel)
+    fel_s = _gaussian_filter(fel, sigma=1.0)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    X, Y = np.meshgrid(xe[:-1], ye[:-1])
+    levels = np.linspace(0, np.percentile(fel_s, 95), 20)
+    c = ax.contourf(X, Y, fel_s.T, levels=levels, cmap="viridis")
+    plt.colorbar(c, ax=ax, label="Free Energy (kcal/mol)")
+    mi = np.unravel_index(np.argmin(fel_s), fel_s.shape)
+    ax.plot(xe[mi[0]], ye[mi[1]], "r*", ms=20, markeredgecolor="white", markeredgewidth=1)
+    ax.set_xlabel("RMSD (Å)"); ax.set_ylabel("Rg (Å)")
+    ax.set_title("Free Energy Landscape", fontweight="bold"); fig.tight_layout()
+    save_and_show(fig, "free_energy_landscape")
+
+# ════════════════════════════════════════════════════
+# eRMSF
+# ════════════════════════════════════════════════════
+if "eRMSF" in analyses:
+    print("📊 Computing eRMSF...")
+    try:
+        from eRMSF import ermsfkit as eRMSF_kit
+        avg = align.AverageStructure(u, u, select=cx_ca, ref_frame=0).run()
+        align.AlignTraj(u, avg.results.universe, select=cx_ca, in_memory=True).run()
+        atoms = u.select_atoms(cx_ca)
+        er = eRMSF_kit(atoms, skip=ermsf_skip, reference_frame=0); er.run()
+        mat = er.results.ermsf
+        fig, ax = plt.subplots(figsize=(14, 6))
+        im = ax.imshow(mat, cmap="viridis", aspect="auto", vmin=ermsf_vmin, vmax=ermsf_vmax,
+                       origin="lower", interpolation="bicubic", extent=[0, sim_ns, -0.5, mat.shape[0]-0.5])
+        ax.set_xlabel("Time (ns)"); ax.set_ylabel("Residue")
+        ax.set_title("eRMSF — Complex", fontweight="bold")
+        plt.colorbar(im, ax=ax, shrink=0.85, label="RMSF (Å)"); fig.tight_layout()
+        save_and_show(fig, "ermsf_heatmap")
+    except Exception as e:
+        print(f"   ⚠️ eRMSF failed: {e}")
+
+_elapsed = _time.time() - _start
+n_files = len(os.listdir(OUT_DIR))
+print(f"\n{'='*60}")
+print(f"  ✅ Analysis complete! ({_elapsed:.0f}s)")
+print(f"  📁 {n_files} files generated in {OUT_DIR}")
+print(f"{'='*60}")
+
+
+# COMMAND ----------
+
+#@title 7. 📝 Generate AI Report (Optional) { display-mode: "form" }
+#@markdown Generate an AI-powered analysis report.
+#@markdown **Groq is free** — get your key at console.groq.com
+
+generate_report = True #@param {type:"boolean"}
+ai_provider = "Groq (free)" #@param ["Groq (free)", "OpenAI", "Google Gemini", "Anthropic"]
+api_key = "" #@param {type:"string"}
+
+# Provider-specific model selection
+if ai_provider == "Groq (free)":
+    model = "meta-llama/llama-4-scout-17b-16e-instruct" #@param ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    _provider = "groq"
+elif ai_provider == "OpenAI":
+    model = "gpt-4.1-mini" #@param ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "o3-mini"]
+    _provider = "openai"
+elif ai_provider == "Google Gemini":
+    model = "gemini-2.5-flash" #@param ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
+    _provider = "gemini"
+else:  # Anthropic
+    model = "claude-sonnet-4-20250514" #@param ["claude-sonnet-4-20250514", "claude-opus-4-20250514"]
+    _provider = "anthropic"
+
+if generate_report and api_key:
+    print(f"Generating AI report with {ai_provider} ({model})...")
+    metrics = []
+    metrics.append(f"System: {n_atoms} atoms, {n_frames} frames, {sim_ns:.0f} ns")
+    metrics.append(f"Analyses run: {', '.join(analyses)}")
+
+    prompt = ("You are a computational biochemist writing a professional MD analysis report. "
+              "Based on these results, write a comprehensive report:\n\n"
+              + "\n".join(metrics) +
+              "\n\nInclude: Executive Summary, per-analysis interpretation, Conclusions. "
+              "Use markdown formatting. Reference specific values.")
+    try:
+        report = call_llm_colab(prompt, _provider, model, api_key=api_key, max_tokens=4096)
+        report_path = os.path.join(OUT_DIR, "AI_Report.md")
+        with open(report_path, "w") as f:
+            f.write(report)
+        display(HTML(f"<details><summary><b>📄 Full AI Report (click to expand)</b></summary><pre>{report[:3000]}...</pre></details>"))
+        print(f"✅ Markdown report saved to {report_path}")
+        # Generate PDF report
+        pdf_path = generate_pdf_report(report, OUT_DIR, title="PepIntProt Analysis Report")
+        if pdf_path:
+            print(f"✅ PDF report saved to {pdf_path}")
+    except Exception as e:
+        print(f"⚠️ Report generation failed: {e}")
+elif generate_report:
+    print(f"⚠️ Enter your {ai_provider} API key above to generate a report.")
+else:
+    print("Skipping AI report generation.")
+
+
+# COMMAND ----------
+
+#@title 8. 📥 Download Results { display-mode: "form" }
+#@markdown Package all results into a ZIP and download.
+
+zip_path = "/content/PepIntProt_results.zip"
+result_files = sorted(os.listdir(OUT_DIR))
+
+print(f"📦 Packaging {len(result_files)} files...")
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    for fname in result_files:
+        zf.write(os.path.join(OUT_DIR, fname), fname)
+
+zip_size = os.path.getsize(zip_path) / (1024 * 1024)
+print(f"\n📁 Files in ZIP:")
+for f in result_files:
+    sz = os.path.getsize(os.path.join(OUT_DIR, f)) / 1024
+    print(f"   {f} ({sz:.1f} KB)")
+
+print(f"\n📦 ZIP size: {zip_size:.1f} MB")
+print("\n⬇️ Downloading...")
+files.download(zip_path)
+print("✅ Download started!")

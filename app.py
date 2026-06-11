@@ -451,6 +451,93 @@ def _render_markdown_para(pdf_obj, text, font_size=10):
     pdf_obj.multi_cell(0, 5, plain)
 
 
+
+def _write_markdown_text(pdf_obj, text, font_size=10, line_height=5):
+    """Write text with inline **bold** and *italic* using fpdf2 write()."""
+    import re
+    pdf_obj.set_font(_FONT_NAME, "", font_size)
+    parts = re.split(r'(\*\*[^*]+\*\*)', text)
+    for part in parts:
+        if part.startswith("**") and part.endswith("**"):
+            pdf_obj.set_font(_FONT_NAME, "B", font_size)
+            pdf_obj.write(line_height, part[2:-2])
+            pdf_obj.set_font(_FONT_NAME, "", font_size)
+        else:
+            sub_parts = re.split(r'(\*[^*]+\*)', part)
+            for sp in sub_parts:
+                if sp.startswith("*") and sp.endswith("*") and len(sp) > 2:
+                    pdf_obj.set_font(_FONT_NAME, "I", font_size)
+                    pdf_obj.write(line_height, sp[1:-1])
+                    pdf_obj.set_font(_FONT_NAME, "", font_size)
+                else:
+                    pdf_obj.write(line_height, sp)
+
+
+def _add_text_to_pdf(pdf_obj, text, font_size=10):
+    """Robust markdown-to-PDF renderer with bold/italic, tables, and bullets."""
+    text = _sanitize_for_pdf(text)
+    line_h = 5
+    for para in text.split("\n\n"):
+        para = para.strip()
+        if not para:
+            pdf_obj.ln(3)
+            continue
+        try:
+            if "|" in para and para.strip().startswith("|"):
+                _rows = [r.strip() for r in para.split("\n") if r.strip()]
+                _rows = [r for r in _rows if not all(c in "|-: " for c in r)]
+                if _rows:
+                    _cols = [c.strip() for c in _rows[0].split("|") if c.strip()]
+                    n_cols = max(len(_cols), 1)
+                    avail_w = pdf_obj.w - pdf_obj.l_margin - pdf_obj.r_margin
+                    col_w = avail_w / n_cols
+                    if col_w < 20 or n_cols > 8:
+                        pdf_obj.set_font(_FONT_NAME, "", font_size - 1)
+                        for row in _rows:
+                            pdf_obj.multi_cell(0, line_h, row.replace("|", " | ").replace("**", "").strip())
+                        pdf_obj.ln(3)
+                    else:
+                        max_chars = max(int(col_w / 2.2), 5)
+                        for ri, row in enumerate(_rows):
+                            cells = [c.strip() for c in row.split("|") if c.strip()]
+                            if ri == 0:
+                                pdf_obj.set_font(_FONT_NAME, "B", font_size - 1)
+                            else:
+                                pdf_obj.set_font(_FONT_NAME, "", font_size - 1)
+                            for cell_text in cells[:n_cols]:
+                                pdf_obj.cell(col_w, 6, cell_text.replace("**", "")[:max_chars], border=1)
+                            pdf_obj.ln()
+                        pdf_obj.ln(3)
+                continue
+            if para.lstrip().startswith("- ") or para.lstrip().startswith("* "):
+                for bline in para.split("\n"):
+                    bline = bline.strip()
+                    if not bline:
+                        continue
+                    if bline.startswith("- ") or bline.startswith("* "):
+                        bline = bline[2:]
+                    if not bline:
+                        continue
+                    pdf_obj.set_font(_FONT_NAME, "", font_size)
+                    pdf_obj.set_x(pdf_obj.l_margin)
+                    pdf_obj.write(line_h, "  " + chr(8226) + " ")
+                    _write_markdown_text(pdf_obj, bline, font_size, line_h)
+                    pdf_obj.ln(line_h)
+                pdf_obj.ln(2)
+                continue
+            _write_markdown_text(pdf_obj, para, font_size, line_h)
+            pdf_obj.ln(line_h + 3)
+        except Exception:
+            try:
+                pdf_obj.set_font(_FONT_NAME, "", font_size)
+                safe = ''.join(c if ord(c) < 128 else '?' for c in
+                               para.replace("**", "").replace("*", "").replace("|", " "))
+                pdf_obj.multi_cell(0, line_h, safe)
+                pdf_obj.ln(3)
+            except Exception:
+                pdf_obj.ln(5)
+
+
 # ====================================================================
 # SIDEBAR CONFIGURATION
 # ====================================================================
@@ -750,6 +837,21 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
     pep_all = f"({peptide_sel}) and (protein or resname ACE NME)"
     prot_all = f"({protein_sel}) and (protein or resname ACE NME)"
 
+    # ── Display labels: if "peptide" chain > 40 residues, label as protein ──
+    if is_holo and peptide_info["n_residues"] > 40:
+        _pep_label = "Protein"
+        _prot_label = "Protein Target"
+        _system_interaction = "Protein–Protein Target"
+    elif is_holo:
+        _pep_label = "Peptide"
+        _prot_label = "Protein Target"
+        _system_interaction = "Peptide–Protein Target"
+    else:
+        _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
+        _pep_label = _apo_lbl
+        _prot_label = _apo_lbl
+        _system_interaction = f"APO {_apo_lbl}"
+
     # Info bar
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Atoms", n_atoms)
@@ -758,8 +860,8 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
     c4.metric("Files uploaded", f"{2 + (1 if plf_path else 0) + (1 if ff_path else 0)}")
 
     if is_holo:
-        st.info(f"**Peptide**: {peptide_sel} ({peptide_info['n_residues']} res)  |  "
-                f"**Protein**: {protein_sel} ({protein_info['n_residues']} res)")
+        st.info(f"**{_pep_label}**: {peptide_sel} ({peptide_info['n_residues']} res)  |  "
+                f"**{_prot_label}**: {protein_sel} ({protein_info['n_residues']} res)")
     else:
         _apo_label = "Protein" if system_type == "APO Protein" else "Peptide"
         st.info(f"**APO {_apo_label}**: {peptide_sel} ({peptide_info['n_residues']} residues)")
@@ -799,7 +901,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
 
             fig = plt.figure(figsize=(22, 5))
             if is_holo:
-                _3d_title = "Protein\u2013Peptide Complex \u2014 Trajectory Snapshots (CA)"
+                _3d_title = f"{_system_interaction} \u2014 Trajectory Snapshots (CA)"
             else:
                 _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
                 _3d_title = f"APO {_apo_lbl} \u2014 Trajectory Snapshots (CA)"
@@ -819,9 +921,9 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 ax.view_init(elev=20, azim=45+i*10)
             handles = [
                 plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#2196F3",
-                           markersize=8, label="Protein (CA)"),
+                           markersize=8, label=f"{_prot_label} (CA)"),
                 plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#E91E63",
-                           markersize=8, label="Peptide (CA)"),
+                           markersize=8, label=f"{_pep_label} (CA)"),
             ]
             fig.legend(handles=handles, loc="lower center", ncol=2, fontsize=10,
                        frameon=False, bbox_to_anchor=(0.5, -0.04))
@@ -844,7 +946,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
             colors_com = cmap_com(np.linspace(0, 1, n_frames))
 
             fig = plt.figure(figsize=(16, 6))
-            fig.suptitle("Peptide Center-of-Mass Trajectory (colored by time)",
+            fig.suptitle(f"{_pep_label} Center-of-Mass Trajectory (colored by time)",
                          fontsize=14, fontweight="bold")
 
             # 3D view
@@ -872,11 +974,11 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                              c=time_array, cmap="plasma", s=4, alpha=0.7)
             ax2.scatter(prot_com[0,0], prot_com[0,1],
                         c="#2196F3", s=100, marker="s", edgecolors="k",
-                        label="Protein COM (t=0)", zorder=5)
+                        label=f"{_prot_label} COM (t=0)", zorder=5)
             ax2.scatter(pep_com[0,0], pep_com[0,1],
-                        c="lime", s=60, edgecolors="k", label="Pep start", zorder=5)
+                        c="lime", s=60, edgecolors="k", label=f"{_pep_label} start", zorder=5)
             ax2.scatter(pep_com[-1,0], pep_com[-1,1],
-                        c="red", s=60, edgecolors="k", label="Pep end", zorder=5)
+                        c="red", s=60, edgecolors="k", label=f"{_pep_label} end", zorder=5)
             cbar = plt.colorbar(sc, ax=ax2, label="Time (ns)", pad=0.02)
             ax2.set_xlabel("X (\u00c5)", fontsize=11, fontweight="bold")
             ax2.set_ylabel("Y (\u00c5)", fontsize=11, fontweight="bold")
@@ -891,7 +993,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
             ovl_frames = np.linspace(0, n_frames - 1, 10, dtype=int)
             fig = plt.figure(figsize=(10, 8))
             ax = fig.add_subplot(111, projection="3d")
-            ax.set_title("Peptide Conformational Ensemble on Protein Surface\n"
+            ax.set_title(f"{_pep_label} Conformational Ensemble on {_prot_label} Surface\n"
                          "(10 evenly spaced frames, CA atoms)",
                          fontsize=13, fontweight="bold")
             u.trajectory[0]
@@ -952,8 +1054,8 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
         with st.expander("\U0001f4c9 RMSD Analysis", expanded=True):
             rmsd_data = {}
             if is_holo:
-                _rmsd_items = [("Protein", prot_ca, "#2196F3"),
-                               ("Peptide", pep_ca, "#E91E63"),
+                _rmsd_items = [(_prot_label, prot_ca, "#2196F3"),
+                               (_pep_label, pep_ca, "#E91E63"),
                                ("Complex", cx_ca, "#4CAF50")]
             else:
                 _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
@@ -1030,20 +1132,20 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
 
                 fig, ax = plt.subplots(figsize=(14, 5))
                 ax.plot(residue_indices[:boundary], rmsf_pep,
-                        color="#E91E63", lw=1.2, alpha=0.9, label="Peptide Inhibitor")
+                        color="#E91E63", lw=1.2, alpha=0.9, label=f"{_pep_label}")
                 ax.plot(residue_indices[boundary:boundary+len(rmsf_prot)], rmsf_prot,
-                        color="#2196F3", lw=1.2, alpha=0.9, label="Protein Target")
+                        color="#2196F3", lw=1.2, alpha=0.9, label=f"{_prot_label}")
                 ax.fill_between(residue_indices[:boundary], rmsf_pep,
                                 alpha=0.15, color="#E91E63")
                 ax.fill_between(residue_indices[boundary:boundary+len(rmsf_prot)], rmsf_prot,
                                 alpha=0.15, color="#2196F3")
                 ymin, ymax = ax.get_ylim()
                 ax.axvline(x=boundary - 0.5, color="black", ls="--", lw=1.5, alpha=0.8)
-                ax.text(boundary - 1, ymax * 0.95, "Peptide", ha="right", fontsize=10,
+                ax.text(boundary - 1, ymax * 0.95, f"{_pep_label}", ha="right", fontsize=10,
                         fontweight="bold", color="#E91E63")
-                ax.text(boundary + 1, ymax * 0.95, "Protein", ha="left", fontsize=10,
+                ax.text(boundary + 1, ymax * 0.95, f"{_prot_label}", ha="left", fontsize=10,
                         fontweight="bold", color="#2196F3")
-                ax.set_title("RMSF: Peptide Inhibitor & Protein Target",
+                ax.set_title(f"RMSF: {_pep_label} & {_prot_label}",
                              fontsize=14, fontweight="bold")
                 _chain_labels = ["Peptide"] * len(rmsf_pep) + ["Protein"] * len(rmsf_prot)
             else:
@@ -1090,8 +1192,8 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
         with st.expander("\U0001f535 Radius of Gyration", expanded=True):
             rg_data = {}
             if is_holo:
-                _rg_items = [("Protein", prot_all, "#2196F3"),
-                             ("Peptide", pep_all, "#E91E63"),
+                _rg_items = [(_prot_label, prot_all, "#2196F3"),
+                             (_pep_label, pep_all, "#E91E63"),
                              ("Complex", cx_ca, "#4CAF50")]
             else:
                 _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
@@ -1139,8 +1241,8 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
         with st.expander("\U0001f3af PCA Analysis", expanded=True):
             from MDAnalysis.analysis.pca import PCA as MDA_PCA
             if is_holo:
-                _pca_items = [("Protein", prot_ca, "#2196F3"),
-                              ("Peptide", pep_ca, "#E91E63"),
+                _pca_items = [(_prot_label, prot_ca, "#2196F3"),
+                              (_pep_label, pep_ca, "#E91E63"),
                               ("Complex", cx_ca, "#4CAF50")]
             else:
                 _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
@@ -1230,7 +1332,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                     ax.set_yticklabels(pep_res_labels, fontsize=8)
                     ax.set_xlabel("Time (ns)", fontsize=12, fontweight="bold")
                     ax.set_ylabel("Residue", fontsize=12, fontweight="bold")
-                    _pep_dssp_title = "Secondary Structure Evolution \u2014 Peptide Inhibitor" if is_holo else "Secondary Structure Evolution \u2014 APO Peptide"
+                    _pep_dssp_title = f"Secondary Structure Evolution \u2014 {_pep_label}" if is_holo else "Secondary Structure Evolution \u2014 APO Peptide"
                     ax.set_title(_pep_dssp_title, fontsize=13, fontweight="bold")
                     ax.tick_params(labelsize=10)
                     cbar = plt.colorbar(im, ax=ax, shrink=0.5, ticks=[0, 1, 2, 3])
@@ -1251,7 +1353,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                     ax.set_yticklabels(prot_res_labels[::tick_step], fontsize=7)
                     ax.set_xlabel("Time (ns)", fontsize=12, fontweight="bold")
                     ax.set_ylabel("Residue", fontsize=12, fontweight="bold")
-                    _prot_dssp_title = "Secondary Structure Evolution \u2014 Protein Target" if is_holo else "Secondary Structure Evolution \u2014 APO Protein"
+                    _prot_dssp_title = f"Secondary Structure Evolution \u2014 {_prot_label}" if is_holo else "Secondary Structure Evolution \u2014 APO Protein"
                     ax.set_title(_prot_dssp_title, fontsize=13, fontweight="bold")
                     ax.tick_params(labelsize=10)
                     cbar = plt.colorbar(im, ax=ax, shrink=0.4, ticks=[0, 1, 2, 3])
@@ -1262,9 +1364,9 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 # ---- SS composition over time (stacked area) ----
                 _dssp_domains = []
                 if pep_idx:
-                    _dssp_domains.append((pep_idx, "Peptide Inhibitor" if is_holo else "APO Peptide"))
+                    _dssp_domains.append((pep_idx, f"{_pep_label}" if is_holo else "APO Peptide"))
                 if prot_idx:
-                    _dssp_domains.append((prot_idx, "Protein Target" if is_holo else "APO Protein"))
+                    _dssp_domains.append((prot_idx, f"{_prot_label}" if is_holo else "APO Protein"))
                 _n_dom = len(_dssp_domains)
                 if _n_dom > 0:
                     fig, axes_ss = plt.subplots(_n_dom, 1, figsize=(12, _n_dom * 4),
@@ -1356,7 +1458,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
             fig, ax = plt.subplots(figsize=(10, 4))
             ax.plot(time_array, dists, color="#9C27B0", lw=.8, alpha=.7)
             ax.set_xlabel("Time (ns)"); ax.set_ylabel("Distance (\u00c5)")
-            ax.set_title("Peptide\u2013Protein COM Distance", fontweight="bold")
+            ax.set_title(f"{_system_interaction} COM Distance", fontweight="bold")
             ax.set_xlim(0, sim_ns)
             fig.tight_layout()
             save_and_show(fig, "distance_com", out_dir)
@@ -1410,9 +1512,9 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                        color="#E91E63", alpha=0.7, edgecolor="#C2185B", lw=0.5)
                 ax.set_xticks(range(len(freq)))
                 ax.set_xticklabels(freq["label"], rotation=45, ha="right", fontsize=9)
-                ax.set_xlabel("Peptide Residue", fontsize=12, fontweight="bold")
+                ax.set_xlabel(f"{_pep_label} Residue", fontsize=12, fontweight="bold")
                 ax.set_ylabel("Contact Occupancy (%)", fontsize=12, fontweight="bold")
-                ax.set_title(f"Peptide Residues in Contact with Protein "
+                ax.set_title(f"{_pep_label} Residues in Contact with {_prot_label} "
                              f"(<{contact_cutoff} \u00c5)",
                              fontsize=13, fontweight="bold")
                 ax.tick_params(labelsize=10)
@@ -1436,7 +1538,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 ax.set_yticks(range(len(top_labels)))
                 ax.set_yticklabels(top_labels, fontsize=10)
                 ax.set_xlabel("Time (ns)", fontsize=12, fontweight="bold")
-                ax.set_ylabel("Peptide Residue", fontsize=12, fontweight="bold")
+                ax.set_ylabel(f"{_pep_label} Residue", fontsize=12, fontweight="bold")
                 ax.set_title(f"Contact Timeline (<{contact_cutoff} \u00c5)",
                              fontsize=13, fontweight="bold")
                 ax.tick_params(labelsize=10)
@@ -1532,10 +1634,36 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                          f"Protein: resid {min(prot_r_plf)}-{max(prot_r_plf)} "
                          f"({len(prot_plf)} atoms)")
 
+                # ── Strategy 1: Pre-filter protein to interface residues ──
+                # Use MDAnalysis 'byres around' (KD-tree optimized) to keep only
+                # protein residues near the peptide. This reduces the atom group
+                # BEFORE ProLIF, cutting RDKit molecule conversion overhead.
+                _n_prot_res = len(set(prot_plf.resids))
+                if _n_prot_res > 500:
+                    st.info(f"Large system ({_n_prot_res} protein residues). "
+                            f"Pre-filtering to interface residues...")
+                    u_plf.trajectory[0]
+                    _interface_prot = u_plf.select_atoms(
+                        f"byres (({prot_sel_plf}) and around 7.0 group pep)",
+                        pep=pep_plf)
+                    _n_interface = len(set(_interface_prot.resids))
+                    if _n_interface > 0:
+                        prot_plf = _interface_prot
+                        st.write(f"Interface pre-filter: {_n_interface} protein residues "
+                                 f"within 7 A (was {_n_prot_res}). "
+                                 f"Protein atoms: {len(prot_plf)}")
+                    else:
+                        st.warning("No interface residues found within 7 A. "
+                                   "Using all protein residues.")
+
                 interactions = ["HBDonor", "HBAcceptor", "Hydrophobic",
                                 "PiStacking", "PiCation", "CationPi",
                                 "Anionic", "Cationic", "VdWContact"]
-                fp = plf.Fingerprint(interactions=interactions)
+                # vicinity_cutoff: ProLIF per-frame filter.
+                # Small systems (<= 500 res): use default (6.0A).
+                # Large systems (> 500 res): tighter 5.7A for performance.
+                _vcutoff = 5.7 if _n_prot_res > 500 else 6.0
+                fp = plf.Fingerprint(interactions=interactions, vicinity_cutoff=_vcutoff)
 
                 # Frame skipping for faster analysis
                 traj_slice = u_plf.trajectory[::prolif_frame_skip]
@@ -1543,25 +1671,56 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 st.write(f"Analyzing {n_plf_frames} frames "
                          f"(skip={prolif_frame_skip}, total={len(u_plf.trajectory)})")
 
-                # Progressive fallback
-                ok = False
-                for attempt, kw in enumerate([
-                    {},
-                    {"converter_kwargs": [{"force": True}, {"force": True}]},
-                    {"converter_kwargs": [{"inferrer": None, "force": True},
-                                          {"inferrer": None, "force": True}]},
-                ]):
-                    try:
-                        st.write(f"Attempt {attempt+1}/3...")
-                        fp.run(traj_slice, pep_plf, prot_plf,
-                               n_jobs=1, **kw)
-                        ok = True
-                        st.write(f"\u2713 Success (attempt {attempt+1})")
-                        break
-                    except Exception as e_plf:
-                        st.write(f"\u2717 Attempt {attempt+1} failed: "
-                                 f"{type(e_plf).__name__}: {str(e_plf)[:120]}")
-                        fp = plf.Fingerprint(interactions=interactions)
+                # ── Run ProLIF in background thread (avoids gateway timeout) ──
+                # The thread runs fp.run() while the main loop updates the UI
+                # every 3s, keeping the browser/WebSocket connection alive.
+                import threading as _threading
+
+                _prolif_status = st.empty()
+                _prolif_result = {"ok": False, "attempt": 0, "error": "", "fp": None}
+
+                def _prolif_worker():
+                    _fp = plf.Fingerprint(interactions=interactions, vicinity_cutoff=_vcutoff)
+                    for _att, _kw in enumerate([
+                        {},
+                        {"converter_kwargs": [{"force": True}, {"force": True}]},
+                        {"converter_kwargs": [{"inferrer": None, "force": True},
+                                              {"inferrer": None, "force": True}]},
+                    ]):
+                        try:
+                            _fp.run(traj_slice, pep_plf, prot_plf, **_kw)
+                            _prolif_result["ok"] = True
+                            _prolif_result["attempt"] = _att + 1
+                            _prolif_result["fp"] = _fp
+                            return
+                        except Exception as _e:
+                            _prolif_result["error"] = (
+                                f"{type(_e).__name__}: {str(_e)[:120]}")
+                            _fp = plf.Fingerprint(interactions=interactions,
+                                                  vicinity_cutoff=_vcutoff)
+                    _prolif_result["ok"] = False
+
+                _thread = _threading.Thread(target=_prolif_worker, daemon=True)
+                _thread.start()
+
+                # Poll loop: update UI every 3s to keep connection alive
+                _t0 = time.time()
+                while _thread.is_alive():
+                    _elapsed = time.time() - _t0
+                    _mins = int(_elapsed) // 60
+                    _secs = int(_elapsed) % 60
+                    _prolif_status.info(
+                        f"ProLIF computing... ({_mins}m {_secs:02d}s elapsed). "
+                        f"Large systems may take several minutes.")
+                    time.sleep(3)
+                _prolif_status.empty()
+
+                ok = _prolif_result["ok"]
+                if ok:
+                    fp = _prolif_result["fp"]
+                    st.write(f"\u2713 Success (attempt {_prolif_result['attempt']})")
+                else:
+                    st.write(f"\u2717 All attempts failed: {_prolif_result['error']}")
 
                 if ok:
                     fp_df = fp.to_dataframe()
@@ -1587,7 +1746,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                         ax.set_yticks(range(len(labels_f)))
                         ax.set_yticklabels(labels_f, fontsize=8)
                         ax.set_xlabel("Occupancy (%)")
-                        ax.set_title("Top Protein\u2013Peptide Interactions (ProLIF)",
+                        ax.set_title(f"Top {_system_interaction} Interactions (ProLIF)",
                                      fontweight="bold")
                         ax.invert_yaxis()
                         fig.tight_layout()
@@ -1623,9 +1782,15 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                                  if isinstance(c, tuple) else str(c)
                                  for c in top_cols]
                     if tl_labels:
+                        import matplotlib as _mpl_limit
+                        _mpl_limit.rcParams['figure.max_open_warning'] = 50
+                        # Limit timeline to avoid decompression bomb error
+                        _max_tl_frames = min(top_ifp.shape[0], 5000)
+                        _tl_skip = max(1, top_ifp.shape[0] // _max_tl_frames)
+                        _tl_data = top_ifp.iloc[::_tl_skip]
                         fig, ax = plt.subplots(
-                            figsize=(16, max(4, len(tl_labels)*0.5)))
-                        im = ax.imshow(top_ifp.T.values, aspect="auto",
+                            figsize=(16, max(4, min(len(tl_labels), 25)*0.5)))
+                        im = ax.imshow(_tl_data.T.values, aspect="auto",
                                        cmap="YlOrRd",
                                        interpolation="nearest", origin="lower",
                                        extent=[0, sim_ns, -0.5,
@@ -1674,8 +1839,8 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                         ax.set_xticklabels(prot_res_plf, rotation=90, fontsize=8)
                         ax.set_yticks(range(len(pep_res_plf)))
                         ax.set_yticklabels(pep_res_plf, fontsize=8)
-                        ax.set_xlabel("Protein Residue", fontsize=12, fontweight="bold")
-                        ax.set_ylabel("Peptide Residue", fontsize=12, fontweight="bold")
+                        ax.set_xlabel(f"{_prot_label} Residue", fontsize=12, fontweight="bold")
+                        ax.set_ylabel(f"{_pep_label} Residue", fontsize=12, fontweight="bold")
                         ax.set_title("Residue\u2013Residue Interaction Map (ProLIF)",
                                      fontsize=13, fontweight="bold")
                         cbar = plt.colorbar(im, ax=ax, shrink=0.5)
@@ -1709,9 +1874,9 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                             ax1.bar(range(len(pn)), po, color="#E91E63", alpha=0.7)
                             ax1.set_xticks(range(len(pn)))
                             ax1.set_xticklabels(pn, rotation=45, ha="right", fontsize=8)
-                            ax1.set_xlabel("Peptide Residue")
+                            ax1.set_xlabel(f"{_pep_label} Residue")
                             ax1.set_ylabel("Interaction Occupancy (%)")
-                            ax1.set_title("Peptide Residue Profile", fontweight="bold")
+                            ax1.set_title(f"{_pep_label} Residue Profile", fontweight="bold")
                             ax1.set_ylim(0, 105)
                         if prot_occ:
                             qs = sorted(prot_occ.items(), key=lambda x: x[1], reverse=True)[:30]
@@ -1719,9 +1884,9 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                             ax2.bar(range(len(qn)), qo, color="#2196F3", alpha=0.7)
                             ax2.set_xticks(range(len(qn)))
                             ax2.set_xticklabels(qn, rotation=45, ha="right", fontsize=8)
-                            ax2.set_xlabel("Protein Residue")
+                            ax2.set_xlabel(f"{_prot_label} Residue")
                             ax2.set_ylabel("Interaction Occupancy (%)")
-                            ax2.set_title("Protein Residue Profile", fontweight="bold")
+                            ax2.set_title(f"{_prot_label} Residue Profile", fontweight="bold")
                             ax2.set_ylim(0, 105)
                         fig.tight_layout()
                         save_and_show(fig, "prolif_residue_profiles", out_dir)
@@ -1769,8 +1934,8 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
 
                 ermsf_results = {}
                 if is_holo:
-                    _ermsf_items = [("Protein", prot_ca),
-                                    ("Peptide", pep_ca),
+                    _ermsf_items = [(_prot_label, prot_ca),
+                                    (_pep_label, pep_ca),
                                     ("Complex", cx_ca)]
                 else:
                     _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
@@ -1795,8 +1960,8 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                                vmin=ermsf_vmin, vmax=ermsf_vmax,
                                origin="lower", interpolation="bicubic",
                                extent=[0, sim_ns, -0.5, mat_cx.shape[0]-0.5])
-                if is_holo and "Peptide" in ermsf_results:
-                    n_pep_ermsf = ermsf_results["Peptide"]["matrix"].shape[0]
+                if is_holo and _pep_label in ermsf_results:
+                    n_pep_ermsf = ermsf_results[_pep_label]["matrix"].shape[0]
                     ax.axhline(y=n_pep_ermsf - 0.5, color="white", ls="--",
                                lw=1.5, alpha=0.8)
                     ax.text(sim_ns * 0.02, n_pep_ermsf + 1, "\u2190 Protein",
@@ -1812,7 +1977,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 ax.set_xlabel("Time (ns)", fontsize=12, fontweight="bold")
                 ax.set_ylabel("Residue", fontsize=12, fontweight="bold")
                 if is_holo:
-                    _ermsf_title = "eRMSF \u2014 Full Complex (Peptide + Protein)"
+                    _ermsf_title = f"eRMSF \u2014 Full Complex ({_pep_label} + {_prot_label})"
                 else:
                     _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
                     _ermsf_title = f"eRMSF \u2014 APO {_apo_lbl}"
@@ -1825,7 +1990,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
 
                 # ---- eRMSF vs RMSF comparison ----
                 if is_holo:
-                    _comp_items = [("Protein", "#2196F3"), ("Peptide", "#E91E63")]
+                    _comp_items = [(_prot_label, "#2196F3"), (_pep_label, "#E91E63")]
                 else:
                     _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
                     _apo_col = "#2196F3" if system_type == "APO Protein" else "#E91E63"
@@ -1838,7 +2003,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                     d = ermsf_results[lbl]
                     m = d["matrix"].mean(axis=1)
                     s = d["matrix"].std(axis=1)
-                    atoms = u.select_atoms(prot_ca if lbl == "Protein" else pep_ca)
+                    atoms = u.select_atoms(prot_ca if lbl == _prot_label else pep_ca)
                     trad = MDA_RMSF(atoms).run().results.rmsf
                     ax.fill_between(d["resids"], m-s, m+s, alpha=.2, color=col,
                                     label="eRMSF \u00b1 \u03c3")
@@ -2121,7 +2286,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 ax.set_xlabel("Time (ns)", fontsize=12, fontweight="bold")
                 ax.set_ylabel(f"Energy ({energy_unit})",
                               fontsize=12, fontweight="bold")
-                ax.set_title(f"Peptide\u2013Protein Interaction Energy ({ie_mode})",
+                ax.set_title(f"{_system_interaction} Interaction Energy ({ie_mode})",
                              fontsize=13, fontweight="bold")
                 ax.set_xlim(0, sim_ns)
                 ax.legend(loc="center left", bbox_to_anchor=(1, 0.5),
@@ -2223,9 +2388,9 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 metrics_text.append(f"SYSTEM: {report_data['system']['n_atoms']} atoms, "
                     f"{report_data['system']['n_frames']} frames, "
                     f"{report_data['system']['simulation_ns']:.0f} ns simulation")
-                metrics_text.append(f"Peptide: {report_data['system']['peptide_sel']} "
+                metrics_text.append(f"{_pep_label}: {report_data['system']['peptide_sel']} "
                     f"({report_data['system']['peptide_n_res']} residues)")
-                metrics_text.append(f"Protein: {report_data['system']['protein_sel']} "
+                metrics_text.append(f"{_prot_label}: {report_data['system']['protein_sel']} "
                     f"({report_data['system']['protein_n_res']} residues)")
                 metrics_text.append("")
                 for analysis_name, metrics in report_data["analyses"].items():
@@ -2239,7 +2404,10 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
 
                 # Build system description for prompt
                 if is_holo:
-                    _system_desc = "a protein-peptide complex simulation"
+                    if peptide_info["n_residues"] > 40:
+                        _system_desc = "a protein-protein complex simulation (two protein chains)"
+                    else:
+                        _system_desc = "a protein-peptide complex simulation"
                     _exec_hint = "(2-3 paragraphs: key findings, system stability, binding characteristics)"
                 else:
                     _apo_label = "Protein" if system_type == "APO Protein" else "Peptide"
@@ -2350,8 +2518,8 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 pdf.cell(0, 7, f"System: {report_data['system']['n_atoms']} atoms, "
                     f"{report_data['system']['n_frames']} frames, "
                     f"{report_data['system']['simulation_ns']:.0f} ns", ln=True, align="C")
-                pdf.cell(0, 7, f"Peptide: {report_data['system']['peptide_n_res']} residues | "
-                    f"Protein: {report_data['system']['protein_n_res']} residues",
+                pdf.cell(0, 7, f"{_pep_label}: {report_data['system']['peptide_n_res']} residues | "
+                    f"{_prot_label}: {report_data['system']['protein_n_res']} residues",
                     ln=True, align="C")
                 pdf.ln(5)
                 import datetime
@@ -2360,65 +2528,7 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 pdf.cell(0, 7, f"AI analysis by {selected_model['label']}", ln=True, align="C")
 
                 # Helper to add markdown-aware wrapped text to PDF
-                def _add_text(pdf_obj, text, font_size=10):
-                    text = _sanitize_for_pdf(text)
-                    for para in text.split("\n\n"):
-                        para = para.strip()
-                        if not para:
-                            continue
-                        try:
-                            # Handle markdown tables
-                            if "|" in para and para.strip().startswith("|"):
-                                _rows = [r.strip() for r in para.split("\n") if r.strip()]
-                                _rows = [r for r in _rows if not all(c in "|-: " for c in r)]
-                                if _rows:
-                                    _cols = [c.strip() for c in _rows[0].split("|") if c.strip()]
-                                    n_cols = max(len(_cols), 1)
-                                    col_w = (pdf_obj.w - 30) / n_cols
-                                    if col_w < 20:
-                                        # Too narrow for table — render as plain lines
-                                        pdf_obj.set_font(_FONT_NAME, "", font_size)
-                                        for row in _rows:
-                                            row_clean = row.replace("|", " | ").replace("**", "").strip()
-                                            pdf_obj.multi_cell(0, 5, row_clean)
-                                        pdf_obj.ln(3)
-                                    else:
-                                        for ri, row in enumerate(_rows):
-                                            cells = [c.strip() for c in row.split("|") if c.strip()]
-                                            if ri == 0:
-                                                pdf_obj.set_font(_FONT_NAME, "B", font_size - 1)
-                                            else:
-                                                pdf_obj.set_font(_FONT_NAME, "", font_size - 1)
-                                            for cell in cells[:n_cols]:
-                                                cell = cell.replace("**", "")
-                                                pdf_obj.cell(col_w, 5, cell, border=1)
-                                            pdf_obj.ln()
-                                        pdf_obj.ln(3)
-                                continue
-                            # Handle bullet lists
-                            if para.lstrip().startswith("- ") or para.lstrip().startswith("* "):
-                                for bline in para.split("\n"):
-                                    bline = bline.strip()
-                                    if bline.startswith("- ") or bline.startswith("* "):
-                                        bline = bline[2:]
-                                    bline = bline.replace("**", "").replace("*", "")
-                                    pdf_obj.set_font(_FONT_NAME, "", font_size)
-                                    pdf_obj.cell(8, 5, chr(8226))
-                                    pdf_obj.multi_cell(0, 5, " " + bline)
-                                pdf_obj.ln(2)
-                                continue
-                            # Regular paragraphs
-                            _render_markdown_para(pdf_obj, para, font_size)
-                            pdf_obj.ln(3)
-                        except Exception:
-                            # Fallback: render paragraph as plain text
-                            try:
-                                pdf_obj.set_font(_FONT_NAME, "", font_size)
-                                plain = para.replace("**", "").replace("*", "").replace("|", " ")
-                                pdf_obj.multi_cell(0, 5, plain)
-                                pdf_obj.ln(3)
-                            except Exception:
-                                pass
+                _add_text = _add_text_to_pdf
 
                 # Helper to add image fitted to page
                 def _add_image(pdf_obj, img_path, max_w=180):
@@ -2644,6 +2754,23 @@ if run_btn:
                                "analyses": {}, "plots": {}}
             combined_report["system"]["n_replicas"] = n_replicas
 
+            # ── Display labels for combined analysis (mirrors _run_single_replica) ──
+            _pep_n_res = combined_report["system"].get("peptide_n_res", 0)
+            if is_holo and _pep_n_res > 40:
+                _pep_label = "Protein"
+                _prot_label = "Protein Target"
+                _system_interaction = "Protein–Protein Target"
+            elif is_holo:
+                _pep_label = "Peptide"
+                _prot_label = "Protein Target"
+                _system_interaction = "Peptide–Protein Target"
+            else:
+                _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
+                _pep_label = _apo_lbl
+                _prot_label = _apo_lbl
+                _system_interaction = f"APO {_apo_lbl}"
+
+
             # ──── RMSD (mean +/- std per series) ────
             if all(("rmsd" in n) for n in all_numeric):
                 with st.expander("\U0001f4c9 RMSD \u2014 Combined", expanded=True):
@@ -2785,7 +2912,7 @@ if run_btn:
                     for ri in range(n_replicas):
                         ax.plot(time_array, all_dists[ri], color="#9C27B0", alpha=0.15, lw=0.3)
                     ax.set_xlabel("Time (ns)"); ax.set_ylabel("Distance (\u00c5)")
-                    ax.set_title(f"Peptide\u2013Protein COM Distance \u2014 Combined ({n_replicas} replicas)",
+                    ax.set_title(f"{_system_interaction} COM Distance — Combined ({n_replicas} replicas)",
                                  fontweight="bold")
                     ax.legend(fontsize=9); ax.set_xlim(0, sim_ns)
                     fig.tight_layout()
@@ -2821,7 +2948,7 @@ if run_btn:
                            capsize=2)
                     ax.set_xticks(list(x))
                     ax.set_xticklabels(_avg_freq["label"], rotation=45, ha="right", fontsize=9)
-                    ax.set_xlabel("Peptide Residue", fontsize=12, fontweight="bold")
+                    ax.set_xlabel(f"{_pep_label} Residue", fontsize=12, fontweight="bold")
                     ax.set_ylabel("Contact Occupancy (%)", fontsize=12, fontweight="bold")
                     ax.set_title(f"Contact Frequency \u2014 Combined ({n_replicas} replicas)",
                                  fontsize=13, fontweight="bold")
@@ -3146,60 +3273,7 @@ if run_btn:
                             ln=True, align="C")
                         pdf.cell(0, 7, f"AI analysis by {selected_model['label']}", ln=True, align="C")
 
-                        def _add_text(pdf_obj, text, font_size=10):
-                            text = _sanitize_for_pdf(text)
-                            for para in text.split("\n\n"):
-                                para = para.strip()
-                                if not para:
-                                    continue
-                                try:
-                                    if "|" in para and para.strip().startswith("|"):
-                                        _rows = [r.strip() for r in para.split("\n") if r.strip()]
-                                        _rows = [r for r in _rows if not all(c in "|-: " for c in r)]
-                                        if _rows:
-                                            _cols = [c.strip() for c in _rows[0].split("|") if c.strip()]
-                                            n_cols = max(len(_cols), 1)
-                                            col_w = (pdf_obj.w - 30) / n_cols
-                                            if col_w < 20:
-                                                pdf_obj.set_font(_FONT_NAME, "", font_size)
-                                                for row in _rows:
-                                                    row_clean = row.replace("|", " | ").replace("**", "").strip()
-                                                    pdf_obj.multi_cell(0, 5, row_clean)
-                                                pdf_obj.ln(3)
-                                            else:
-                                                for ri, row in enumerate(_rows):
-                                                    cells = [c.strip() for c in row.split("|") if c.strip()]
-                                                    if ri == 0:
-                                                        pdf_obj.set_font(_FONT_NAME, "B", font_size - 1)
-                                                    else:
-                                                        pdf_obj.set_font(_FONT_NAME, "", font_size - 1)
-                                                    for cell in cells[:n_cols]:
-                                                        cell = cell.replace("**", "")
-                                                        pdf_obj.cell(col_w, 5, cell, border=1)
-                                                    pdf_obj.ln()
-                                                pdf_obj.ln(3)
-                                        continue
-                                    if para.lstrip().startswith("- ") or para.lstrip().startswith("* "):
-                                        for bline in para.split("\n"):
-                                            bline = bline.strip()
-                                            if bline.startswith("- ") or bline.startswith("* "):
-                                                bline = bline[2:]
-                                            bline = bline.replace("**", "").replace("*", "")
-                                            pdf_obj.set_font(_FONT_NAME, "", font_size)
-                                            pdf_obj.cell(8, 5, chr(8226))
-                                            pdf_obj.multi_cell(0, 5, " " + bline)
-                                        pdf_obj.ln(2)
-                                        continue
-                                    _render_markdown_para(pdf_obj, para, font_size)
-                                    pdf_obj.ln(3)
-                                except Exception:
-                                    try:
-                                        pdf_obj.set_font(_FONT_NAME, "", font_size)
-                                        plain = para.replace("**", "").replace("*", "").replace("|", " ")
-                                        pdf_obj.multi_cell(0, 5, plain)
-                                        pdf_obj.ln(3)
-                                    except Exception:
-                                        pass
+                        _add_text = _add_text_to_pdf
 
                         def _add_image(pdf_obj, img_path, max_w=180):
                             if os.path.exists(img_path):
