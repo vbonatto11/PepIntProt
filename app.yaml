@@ -20,7 +20,7 @@ command:
     pip install -q -r requirements.txt
 
     # -- Install ermsfkit from GitHub --
-    pip install -q git+https://github.com/pablo-arantes/ermsfkit.git
+    pip install git+https://github.com/pablo-arantes/ermsfkit.git
 
     # -- Add miniforge site-packages to PYTHONPATH --
     export PYTHONPATH="$(find /tmp/miniforge/lib -name site-packages -type d | head -1):$PYTHONPATH"
