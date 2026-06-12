@@ -14,10 +14,10 @@ command:
 
     # -- Install core MD packages via mamba (faster + binary deps) --
     # rdkit is required by ProLIF and must be installed via conda/mamba
-    mamba install -c conda-forge python=3.12 mdanalysis mdtraj rdkit -y -q
+    mamba install -c conda-forge python=3.12 mdanalysis mdtraj rdkit -y
 
     # -- Install pip packages from requirements.txt --
-    pip install -q -r requirements.txt
+    pip install -r requirements.txt
 
     # -- Install ermsfkit from GitHub --
     pip install git+https://github.com/pablo-arantes/ermsfkit.git
