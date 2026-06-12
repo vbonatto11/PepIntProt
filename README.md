@@ -76,6 +76,7 @@ conda activate pip_env
 conda install -c conda-forge mdanalysis mdtraj rdkit prolif
 
 # Install Python dependencies
+pip install git+https://github.com/pablo-arantes/ermsfkit.git
 pip install -r requirements.txt
 
 # Run
