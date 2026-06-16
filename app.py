@@ -9,7 +9,7 @@ GitHub ermsfkit: github.com/pablo-arantes/ermsfkit
 """
 
 import streamlit as st
-import os, sys, glob, warnings, io, zipfile, time, tempfile
+import os, sys, glob, warnings, io, zipfile, time, tempfile, shutil
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -548,11 +548,25 @@ with st.sidebar:
     st.subheader("System Type")
     system_type = st.selectbox(
         "Simulation system",
-        ["Holo (Peptide + Protein)", "APO Protein", "APO Peptide"],
+        ["Holo (Peptide + Protein)", "Holo (Protein + Ligand)", "APO Protein", "APO Peptide"],
         index=0,
-        help="Holo: peptide\u2013protein complex. APO: single-chain simulation "
-             "(protein-only or peptide-only). APO mode disables interaction analyses.")
+        help="Holo (Peptide + Protein): peptide\u2013protein complex. "
+             "Holo (Protein + Ligand): protein\u2013small molecule complex. "
+             "APO: single-chain simulation (protein-only or peptide-only). "
+             "APO mode disables interaction analyses.")
     is_holo = system_type.startswith("Holo")
+    is_holo_ligand = system_type == "Holo (Protein + Ligand)"
+
+    # ── Ligand residue name (only for Protein + Ligand mode) ──
+    if is_holo_ligand:
+        ligand_resname = st.text_input(
+            "Ligand residue name",
+            value="LIG",
+            help="Enter the 3-letter residue name of the ligand as it appears "
+                 "in your topology file (e.g., LIG, UNK, MOL, JZ4). "
+                 "The app will separate protein and ligand based on this name.")
+    else:
+        ligand_resname = ""
 
     # ── Replicas ──
     st.subheader("\U0001f501 Replicas")
@@ -598,12 +612,14 @@ with st.sidebar:
     simulation_time_ns = st.number_input(
         "Total simulation time (ns)", value=500.0, min_value=0.1, step=50.0)
 
-    if is_holo:
+    if is_holo and not is_holo_ligand:
         st.subheader("Chain detection")
         auto_detect = st.checkbox("Auto-detect chains", value=True)
         if not auto_detect:
             manual_pep = st.text_input("Peptide selection", value="chainID A")
             manual_prot = st.text_input("Protein selection", value="chainID B")
+    elif is_holo_ligand:
+        auto_detect = False
     else:
         auto_detect = True
 
@@ -622,9 +638,11 @@ with st.sidebar:
     fel_temperature = st.number_input("Temperature (K)", value=300.0, min_value=1.0, step=10.0)
     fel_bins = st.slider("FEL bins", 30, 100, 50, 5)
     if is_holo:
+        _fel_options = (["Protein + Ligand", "All atoms"] if is_holo_ligand
+                        else ["Peptide + Protein", "All atoms"])
         fel_extract_selection = st.selectbox(
             "Atoms to extract (representative frame)",
-            ["Peptide + Protein", "All atoms"],
+            _fel_options,
             index=0)
     else:
         fel_extract_selection = "All atoms"
@@ -704,18 +722,9 @@ with st.sidebar:
             "provider": "gemini", "endpoint": "gemini-2.0-flash",
             "supports_vision": True, "label": "Gemini 2.0 Flash (Google)"},
         # ── Ollama (local, no key needed) ──
-        "Ollama \u2014 Qwen3.5 7B": {
-            "provider": "ollama", "endpoint": "qwen3.5:7b",
-            "supports_vision": False, "label": "Qwen3.5 7B (Ollama local)"},
-        "Ollama \u2014 LLaMA 3.3 70B": {
-            "provider": "ollama", "endpoint": "llama3.3:70b",
-            "supports_vision": False, "label": "LLaMA 3.3 70B (Ollama local)"},
-        "Ollama \u2014 DeepSeek R1 32B": {
-            "provider": "ollama", "endpoint": "deepseek-r1:32b",
-            "supports_vision": False, "label": "DeepSeek R1 32B (Ollama local)"},
-        "Ollama \u2014 Gemma 3 27B": {
-            "provider": "ollama", "endpoint": "gemma3:27b",
-            "supports_vision": True, "label": "Gemma 3 27B (Ollama local)"},
+        "Ollama \u2014 Local Model": {
+            "provider": "ollama", "endpoint": "",
+            "supports_vision": False, "label": "Local Model (Ollama)"},
     }
 
     selected_model_name = st.selectbox(
@@ -742,11 +751,19 @@ with st.sidebar:
         llm_api_key = st.text_input("Google Gemini API Key", type="password",
             help="Get yours at aistudio.google.com/apikey")
     elif _provider == "ollama":
+        _ollama_model = st.text_input(
+            "Model name",
+            value="",
+            placeholder="e.g. gemma4:latest, qwen3.5:latest, llama3:8b",
+            help="Type the exact model name as shown by \'ollama list\' on your machine.")
+        if _ollama_model.strip():
+            selected_model["endpoint"] = _ollama_model.strip()
+            selected_model["label"] = f"{_ollama_model.strip()} (Ollama local)"
         _ollama_url = st.text_input("Ollama URL", value="http://localhost:11434",
-            help="URL of your local Ollama server")
+            help="URL of your local Ollama server (default is fine for most setups)")
         selected_model["ollama_url"] = _ollama_url
         st.caption("\u2699\ufe0f Ollama runs locally \u2014 no API key needed. "
-                   "Make sure Ollama is running with the selected model pulled.")
+                   "Run \'ollama list\' in your terminal to see available models.")
     else:
         st.caption("\u2705 Using Databricks workspace authentication \u2014 no API key needed.")
 
@@ -776,6 +793,25 @@ with st.sidebar:
     )
 
     run_btn = st.button("\U0001f680 Run Analysis", type="primary", use_container_width=True)
+
+    st.divider()
+    if st.button("\U0001f9f9 Clear Cache", use_container_width=True,
+                 help="Remove all temporary files from previous runs and reset the session."):
+        # Remove all pepintprot_ temp dirs from /tmp
+        for _d in glob.glob("/tmp/pepintprot_*"):
+            shutil.rmtree(_d, ignore_errors=True)
+        # Also clear the one stored in session_state
+        _prev = st.session_state.pop("tmp_dir", None)
+        if _prev and os.path.isdir(_prev):
+            shutil.rmtree(_prev, ignore_errors=True)
+        # Clear all result keys
+        for _k in list(st.session_state.keys()):
+            if _k.startswith(("zip_data_", "zip_name_", "pdf_data_", "pdf_name_",
+                               "all_zip_keys", "all_pdf_keys", "result_images")):
+                del st.session_state[_k]
+        st.session_state["analysis_done"] = False
+        st.success("\u2705 Cache cleared successfully.")
+        st.rerun()
 
 
 
@@ -808,7 +844,26 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
     numeric["_time_array"] = time_array
 
     # Detect chains (Holo) or use single chain (APO)
-    if is_holo:
+    if is_holo and is_holo_ligand:
+        # Protein + Ligand mode: separate by residue name
+        _lig_atoms = u.select_atoms(f"resname {ligand_resname}")
+        if len(_lig_atoms) == 0:
+            st.error(f"No atoms found with resname '{ligand_resname}'. "
+                     f"Available residue names: {', '.join(sorted(set(u.atoms.resnames))[:30])}")
+            st.stop()
+        _prot_atoms = u.select_atoms(f"protein and not resname {ligand_resname}")
+        if len(_prot_atoms) == 0:
+            st.error("No protein atoms found after excluding the ligand.")
+            st.stop()
+        peptide_sel = f"resname {ligand_resname}"
+        protein_sel = f"protein and not resname {ligand_resname}"
+        _lig_resids = sorted(set(_lig_atoms.resids))
+        _prot_resids = sorted(set(_prot_atoms.resids))
+        peptide_info = dict(n_residues=len(_lig_resids),
+            first_resid=min(_lig_resids), last_resid=max(_lig_resids))
+        protein_info = dict(n_residues=len(_prot_resids),
+            first_resid=min(_prot_resids), last_resid=max(_prot_resids))
+    elif is_holo:
         if auto_detect:
             peptide_sel, protein_sel, peptide_info, protein_info = detect_chains(u)
         else:
@@ -831,14 +886,26 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
         peptide_info = _apo_info
         protein_info = _apo_info
 
-    pep_ca = f"({peptide_sel}) and name CA"
-    prot_ca = f"({protein_sel}) and name CA"
-    cx_ca = f"(({peptide_sel}) or ({protein_sel})) and name CA"
-    pep_all = f"({peptide_sel}) and (protein or resname ACE NME)"
-    prot_all = f"({protein_sel}) and (protein or resname ACE NME)"
+    if is_holo_ligand:
+        # Ligand mode: use all heavy atoms for the ligand (no CA backbone)
+        pep_ca = f"({peptide_sel}) and not name H*"  # heavy atoms as proxy for CA
+        prot_ca = f"({protein_sel}) and name CA"
+        cx_ca = f"(({peptide_sel}) and not name H*) or (({protein_sel}) and name CA)"
+        pep_all = f"({peptide_sel})"
+        prot_all = f"({protein_sel})"
+    else:
+        pep_ca = f"({peptide_sel}) and name CA"
+        prot_ca = f"({protein_sel}) and name CA"
+        cx_ca = f"(({peptide_sel}) or ({protein_sel})) and name CA"
+        pep_all = f"({peptide_sel}) and (protein or resname ACE NME)"
+        prot_all = f"({protein_sel}) and (protein or resname ACE NME)"
 
-    # ── Display labels: if "peptide" chain > 40 residues, label as protein ──
-    if is_holo and peptide_info["n_residues"] > 40:
+    # ── Display labels ──
+    if is_holo_ligand:
+        _pep_label = "Ligand"
+        _prot_label = "Protein"
+        _system_interaction = "Protein–Ligand"
+    elif is_holo and peptide_info["n_residues"] > 40:
         _pep_label = "Protein"
         _prot_label = "Protein Target"
         _system_interaction = "Protein–Protein Target"
@@ -869,9 +936,11 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
     total_analyses = len(analyses)
     report_data = {"system": {
         "n_atoms": n_atoms, "n_frames": n_frames, "simulation_ns": sim_ns,
+        "system_type": system_type,
         "peptide_sel": peptide_sel, "protein_sel": protein_sel,
         "peptide_n_res": peptide_info["n_residues"],
-        "protein_n_res": protein_info["n_residues"]},
+        "protein_n_res": protein_info["n_residues"],
+        "ligand_resname": ligand_resname if is_holo_ligand else None},
         "analyses": {}, "plots": {}}
 
     completed = 0
@@ -1123,12 +1192,25 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
             if is_holo:
                 pep_atoms = u.select_atoms(pep_ca)
                 prot_atoms = u.select_atoms(prot_ca)
-                peptide_resids = sorted(set(pep_atoms.resids))
-                protein_resids = sorted(set(prot_atoms.resids))
-                resid_to_idx = {resid: i for i, resid in enumerate(all_ca_atoms.resids)}
-                rmsf_pep = [rmsf_values[resid_to_idx[r]] for r in peptide_resids if r in resid_to_idx]
-                rmsf_prot = [rmsf_values[resid_to_idx[r]] for r in protein_resids if r in resid_to_idx]
-                boundary = len(rmsf_pep)
+
+                if is_holo_ligand:
+                    # Ligand mode: multiple heavy atoms per residue
+                    # Build per-atom split (each heavy atom gets its own RMSF point)
+                    pep_atom_indices = set(pep_atoms.indices)
+                    _lig_mask = np.array([a.index in pep_atom_indices for a in all_ca_atoms])
+                    rmsf_pep = rmsf_values[_lig_mask]
+                    rmsf_prot = rmsf_values[~_lig_mask]
+                    boundary = int(_lig_mask.sum())
+                    _chain_labels = ["Ligand" if m else "Protein" for m in _lig_mask]
+                else:
+                    # Standard holo: one CA per residue
+                    peptide_resids = sorted(set(pep_atoms.resids))
+                    protein_resids = sorted(set(prot_atoms.resids))
+                    resid_to_idx = {resid: i for i, resid in enumerate(all_ca_atoms.resids)}
+                    rmsf_pep = [rmsf_values[resid_to_idx[r]] for r in peptide_resids if r in resid_to_idx]
+                    rmsf_prot = [rmsf_values[resid_to_idx[r]] for r in protein_resids if r in resid_to_idx]
+                    boundary = len(rmsf_pep)
+                    _chain_labels = ["Peptide"] * len(rmsf_pep) + ["Protein"] * len(rmsf_prot)
 
                 fig, ax = plt.subplots(figsize=(14, 5))
                 ax.plot(residue_indices[:boundary], rmsf_pep,
@@ -1147,7 +1229,6 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                         fontweight="bold", color="#2196F3")
                 ax.set_title(f"RMSF: {_pep_label} & {_prot_label}",
                              fontsize=14, fontweight="bold")
-                _chain_labels = ["Peptide"] * len(rmsf_pep) + ["Protein"] * len(rmsf_prot)
             else:
                 _apo_lbl = "Protein" if system_type == "APO Protein" else "Peptide"
                 _apo_col = "#2196F3" if system_type == "APO Protein" else "#E91E63"
@@ -1158,7 +1239,8 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 ax.set_title(f"RMSF: APO {_apo_lbl}", fontsize=14, fontweight="bold")
                 _chain_labels = [_apo_lbl] * len(rmsf_values)
 
-            ax.set_xlabel("Residue Index", fontsize=13, fontweight="bold")
+            _rmsf_xlabel = "Atom Index (heavy atoms | CA)" if is_holo_ligand else "Residue Index"
+            ax.set_xlabel(_rmsf_xlabel, fontsize=13, fontweight="bold")
             ax.set_ylabel("RMSF ($\\AA$)", fontsize=13, fontweight="bold")
             ax.set_xlim(0, len(rmsf_values) - 1)
             ax.tick_params(labelsize=11)
@@ -1304,7 +1386,11 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 # Detect protein chains (ions already removed)
                 mt_chains = [c for c in traj.topology.chains if c.n_residues > 0]
                 mt_chains.sort(key=lambda c: c.n_residues)
-                if is_holo and len(mt_chains) >= 2:
+                if is_holo_ligand:
+                    # Ligand has no secondary structure; only compute protein DSSP
+                    pep_chain = None
+                    prot_chain = mt_chains[-1]
+                elif is_holo and len(mt_chains) >= 2:
                     pep_chain = mt_chains[0]
                     prot_chain = mt_chains[-1]
                 else:
@@ -1602,49 +1688,68 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                 except Exception:
                     st.write(f"ProLIF topology: {len(u_plf.atoms)} atoms")
 
-                # Detect chains by resid gaps
-                all_prot_plf = u_plf.select_atoms("protein or resname ACE NME")
-                all_resids_plf = sorted(set(all_prot_plf.resids))
-                chains_plf, cur = [], [all_resids_plf[0]]
-                for i in range(1, len(all_resids_plf)):
-                    if all_resids_plf[i] - all_resids_plf[i-1] > 1:
-                        chains_plf.append(cur); cur = [all_resids_plf[i]]
-                    else:
-                        cur.append(all_resids_plf[i])
-                chains_plf.append(cur)
-
-                if len(chains_plf) >= 2:
-                    chains_plf.sort(key=len)
-                    pep_r_plf = chains_plf[0]
-                    prot_r_plf = chains_plf[-1]
+                # Detect chains / ligand for ProLIF
+                if is_holo_ligand:
+                    # Protein + Ligand mode: select by residue name
+                    pep_plf = u_plf.select_atoms(f"resname {ligand_resname}")
+                    prot_plf = u_plf.select_atoms(
+                        f"protein and not resname {ligand_resname}")
+                    if len(pep_plf) == 0:
+                        st.error(f"ProLIF: No atoms found with resname "
+                                 f"'{ligand_resname}' in ProLIF topology.")
+                        raise ValueError("Ligand not found in ProLIF topology")
+                    st.write(f"Ligand ({ligand_resname}): "
+                             f"{len(pep_plf)} atoms | "
+                             f"Protein: {len(prot_plf)} atoms")
                 else:
-                    n_pep = peptide_info["n_residues"]
-                    pep_r_plf = list(range(1, n_pep + 1))
-                    prot_r_plf = list(range(n_pep + 1, len(all_resids_plf) + 1))
+                    # Peptide + Protein mode: detect chains by resid gaps
+                    all_prot_plf = u_plf.select_atoms("protein or resname ACE NME")
+                    all_resids_plf = sorted(set(all_prot_plf.resids))
+                    chains_plf, cur = [], [all_resids_plf[0]]
+                    for i in range(1, len(all_resids_plf)):
+                        if all_resids_plf[i] - all_resids_plf[i-1] > 1:
+                            chains_plf.append(cur); cur = [all_resids_plf[i]]
+                        else:
+                            cur.append(all_resids_plf[i])
+                    chains_plf.append(cur)
 
-                pep_sel_plf = (f"resid {min(pep_r_plf)}:{max(pep_r_plf)} "
-                               f"and (protein or resname ACE NME)")
-                prot_sel_plf = (f"resid {min(prot_r_plf)}:{max(prot_r_plf)} "
-                                f"and (protein or resname ACE NME)")
-                pep_plf = u_plf.select_atoms(pep_sel_plf)
-                prot_plf = u_plf.select_atoms(prot_sel_plf)
+                    if len(chains_plf) >= 2:
+                        chains_plf.sort(key=len)
+                        pep_r_plf = chains_plf[0]
+                        prot_r_plf = chains_plf[-1]
+                    else:
+                        n_pep = peptide_info["n_residues"]
+                        pep_r_plf = list(range(1, n_pep + 1))
+                        prot_r_plf = list(range(n_pep + 1, len(all_resids_plf) + 1))
 
-                st.write(f"Peptide: resid {min(pep_r_plf)}-{max(pep_r_plf)} "
-                         f"({len(pep_plf)} atoms) | "
-                         f"Protein: resid {min(prot_r_plf)}-{max(prot_r_plf)} "
-                         f"({len(prot_plf)} atoms)")
+                    pep_sel_plf = (f"resid {min(pep_r_plf)}:{max(pep_r_plf)} "
+                                   f"and (protein or resname ACE NME)")
+                    prot_sel_plf = (f"resid {min(prot_r_plf)}:{max(prot_r_plf)} "
+                                    f"and (protein or resname ACE NME)")
+                    pep_plf = u_plf.select_atoms(pep_sel_plf)
+                    prot_plf = u_plf.select_atoms(prot_sel_plf)
+
+                    st.write(f"Peptide: resid {min(pep_r_plf)}-{max(pep_r_plf)} "
+                             f"({len(pep_plf)} atoms) | "
+                             f"Protein: resid {min(prot_r_plf)}-{max(prot_r_plf)} "
+                             f"({len(prot_plf)} atoms)")
 
                 # ── Strategy 1: Pre-filter protein to interface residues ──
                 # Use MDAnalysis 'byres around' (KD-tree optimized) to keep only
-                # protein residues near the peptide. This reduces the atom group
-                # BEFORE ProLIF, cutting RDKit molecule conversion overhead.
+                # protein residues near the peptide/ligand. This reduces the atom
+                # group BEFORE ProLIF, cutting RDKit molecule conversion overhead.
                 _n_prot_res = len(set(prot_plf.resids))
                 if _n_prot_res > 500:
                     st.info(f"Large system ({_n_prot_res} protein residues). "
                             f"Pre-filtering to interface residues...")
                     u_plf.trajectory[0]
+                    # Build selection string for the pre-filter query
+                    if is_holo_ligand:
+                        _prot_sel_for_filter = f"protein and not resname {ligand_resname}"
+                    else:
+                        _prot_sel_for_filter = prot_sel_plf
                     _interface_prot = u_plf.select_atoms(
-                        f"byres (({prot_sel_plf}) and around 7.0 group pep)",
+                        f"byres (({_prot_sel_for_filter}) and around 7.0 group pep)",
                         pep=pep_plf)
                     _n_interface = len(set(_interface_prot.resids))
                     if _n_interface > 0:
@@ -1945,9 +2050,17 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                     er = eRMSF_kit(atoms, skip=ermsf_skip, reference_frame=0)
                     er.run()
                     mat = er.results.ermsf
-                    resids = atoms.residues.resids
-                    resnames = atoms.residues.resnames
-                    labels_r = [f"{rn}{ri}" for rn, ri in zip(resnames, resids)]
+                    if is_holo_ligand and sel in (pep_ca, cx_ca):
+                        # Per-atom data: ligand has multiple heavy atoms per residue
+                        # Use sequential indices and atom-level labels
+                        resids = np.arange(len(atoms))
+                        resnames = atoms.names
+                        labels_r = [f"{atoms.resnames[i]}{atoms.resids[i]}:{atoms.names[i]}"
+                                    for i in range(len(atoms))]
+                    else:
+                        resids = atoms.residues.resids
+                        resnames = atoms.residues.resnames
+                        labels_r = [f"{rn}{ri}" for rn, ri in zip(resnames, resids)]
                     ermsf_results[lbl] = dict(
                         matrix=mat, resids=resids,
                         resnames=resnames, labels=labels_r)
@@ -1960,13 +2073,23 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                                vmin=ermsf_vmin, vmax=ermsf_vmax,
                                origin="lower", interpolation="bicubic",
                                extent=[0, sim_ns, -0.5, mat_cx.shape[0]-0.5])
-                if is_holo and _pep_label in ermsf_results:
+                if is_holo_ligand and _prot_label in ermsf_results:
+                    # Ligand appears AFTER protein in topology order
+                    n_prot_ermsf = ermsf_results[_prot_label]["matrix"].shape[0]
+                    ax.axhline(y=n_prot_ermsf - 0.5, color="white", ls="--",
+                               lw=1.5, alpha=0.8)
+                    ax.text(sim_ns * 0.02, n_prot_ermsf + 1, f"\u2190 {_pep_label}",
+                            color="white", fontsize=9, fontweight="bold", va="bottom")
+                    ax.text(sim_ns * 0.02, n_prot_ermsf - 2, f"{_prot_label} \u2192",
+                            color="white", fontsize=9, fontweight="bold", va="top")
+                elif is_holo and _pep_label in ermsf_results:
+                    # Peptide appears BEFORE protein in topology order
                     n_pep_ermsf = ermsf_results[_pep_label]["matrix"].shape[0]
                     ax.axhline(y=n_pep_ermsf - 0.5, color="white", ls="--",
                                lw=1.5, alpha=0.8)
-                    ax.text(sim_ns * 0.02, n_pep_ermsf + 1, "\u2190 Protein",
+                    ax.text(sim_ns * 0.02, n_pep_ermsf + 1, f"\u2190 {_prot_label}",
                             color="white", fontsize=9, fontweight="bold", va="bottom")
-                    ax.text(sim_ns * 0.02, n_pep_ermsf - 2, "Peptide \u2192",
+                    ax.text(sim_ns * 0.02, n_pep_ermsf - 2, f"{_pep_label} \u2192",
                             color="white", fontsize=9, fontweight="bold", va="top")
                 n_cx = mat_cx.shape[0]
                 step_cx = max(1, n_cx // 20)
@@ -2022,7 +2145,8 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                                     xy=(d["resids"][idx], m[idx]),
                                     fontsize=7, fontweight="bold", color=col,
                                     ha="center", va="bottom")
-                axes[-1].set_xlabel("Residue ID")
+                _ermsf_x_label = "Atom Index" if is_holo_ligand else "Residue ID"
+                axes[-1].set_xlabel(_ermsf_x_label)
                 fig.tight_layout()
                 save_and_show(fig, "ermsf_vs_rmsf_comparison", out_dir)
 
@@ -2361,6 +2485,9 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
         prog.progress(completed / max(total_analyses, 1), text="Generating AI report...")
         with st.expander("\U0001f4dd AI-Generated PDF Report", expanded=True):
             try:
+                if selected_model["provider"] == "ollama" and not selected_model.get("endpoint", "").strip():
+                    st.error("\u26a0\ufe0f Please enter a model name in the \'Model name\' field in the sidebar before generating a report.")
+                    raise ValueError("Ollama model name not specified.")
                 if not HAS_FPDF:
                     st.error("fpdf2 package not installed.")
                     raise ImportError("fpdf2")
@@ -2403,7 +2530,14 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                     metrics_text.append("")
 
                 # Build system description for prompt
-                if is_holo:
+                if is_holo_ligand:
+                    _system_desc = (
+                        "a protein-ligand complex simulation. "
+                        "The system contains a protein and a small-molecule ligand "
+                        f"(residue name: {ligand_resname}). Analyses labeled 'Ligand' "
+                        "refer to the small molecule, and 'Protein' to the receptor.")
+                    _exec_hint = "(2-3 paragraphs: key findings, binding stability, ligand dynamics)"
+                elif is_holo:
                     if peptide_info["n_residues"] > 40:
                         _system_desc = "a protein-protein complex simulation (two protein chains)"
                     else:
@@ -2512,7 +2646,16 @@ def _run_single_replica(traj_path, top_path, plf_path, ff_path, out_dir, rep_lab
                         pass
                 pdf.cell(0, 15, "PepIntProt (PIP)", ln=True, align="C")
                 pdf.set_font(_FONT_NAME, "", 16)
-                pdf.cell(0, 10, "Peptide-Protein Interaction Analysis Report", ln=True, align="C")
+                if is_holo_ligand:
+                    _cover_subtitle = "Protein-Ligand Interaction Analysis Report"
+                elif is_holo and peptide_info["n_residues"] > 40:
+                    _cover_subtitle = "Protein-Protein Interaction Analysis Report"
+                elif is_holo:
+                    _cover_subtitle = "Peptide-Protein Interaction Analysis Report"
+                else:
+                    _apo_lbl_cover = "Protein" if system_type == "APO Protein" else "Peptide"
+                    _cover_subtitle = f"APO {_apo_lbl_cover} Structural Analysis Report"
+                pdf.cell(0, 10, _cover_subtitle, ln=True, align="C")
                 pdf.ln(10)
                 pdf.set_font(_FONT_NAME, "", 11)
                 pdf.cell(0, 7, f"System: {report_data['system']['n_atoms']} atoms, "
@@ -2680,7 +2823,12 @@ if run_btn:
         st.stop()
 
     # ── Temp directory ──
+    # Clean up previous run's temp directory if it exists
+    _prev_tmp = st.session_state.get("tmp_dir")
+    if _prev_tmp and os.path.isdir(_prev_tmp):
+        shutil.rmtree(_prev_tmp, ignore_errors=True)
     tmp_dir = tempfile.mkdtemp(prefix="pepintprot_")
+    st.session_state["tmp_dir"] = tmp_dir
 
     # Save shared files
     top_path = _save_upload(top_up, tmp_dir)
@@ -3200,7 +3348,11 @@ if run_btn:
                                 metrics_text.append(f"  {metrics}")
                             metrics_text.append("")
 
-                        if is_holo:
+                        if is_holo_ligand:
+                            _system_desc = (
+                                f"a protein-ligand complex simulation "
+                                f"(ligand residue: {ligand_resname})")
+                        elif is_holo:
                             _system_desc = "a protein-peptide complex simulation"
                         else:
                             _apo_label = "Protein" if system_type == "APO Protein" else "Peptide"
@@ -3265,7 +3417,16 @@ if run_btn:
                                 pass
                         pdf.cell(0, 15, "PepIntProt (PIP)", ln=True, align="C")
                         pdf.set_font(_FONT_NAME, "", 16)
-                        pdf.cell(0, 10, f"Combined Report ({n_replicas} Replicas)", ln=True, align="C")
+                        if is_holo_ligand:
+                            _comb_subtitle = f"Protein-Ligand Combined Report ({n_replicas} Replicas)"
+                        elif is_holo and _pep_n_res > 40:
+                            _comb_subtitle = f"Protein-Protein Combined Report ({n_replicas} Replicas)"
+                        elif is_holo:
+                            _comb_subtitle = f"Peptide-Protein Combined Report ({n_replicas} Replicas)"
+                        else:
+                            _apo_lbl_cover = "Protein" if system_type == "APO Protein" else "Peptide"
+                            _comb_subtitle = f"APO {_apo_lbl_cover} Combined Report ({n_replicas} Replicas)"
+                        pdf.cell(0, 10, _comb_subtitle, ln=True, align="C")
                         pdf.ln(10)
                         pdf.set_font(_FONT_NAME, "", 11)
                         import datetime
