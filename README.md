@@ -5,7 +5,7 @@
 <h1 align="center">PepIntProt (PIP) v4.0</h1>
 
 <p align="center">
-  <b>Peptide–Protein Interaction Profiler from Molecular Dynamics Simulations</b>
+  <b>Peptide–Protein & Protein–Ligand Interaction Profiler from Molecular Dynamics Simulations</b>
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
 
 ## Overview
 
-**PepIntProt (PIP)** is a comprehensive, interactive tool for analyzing Molecular Dynamics (MD) trajectories of peptide–protein complexes and APO (single-chain) simulations. It provides 12 publication-ready analyses with automated AI-powered PDF reports.
+**PepIntProt (PIP)** is a comprehensive, interactive tool for analyzing Molecular Dynamics (MD) trajectories of peptide–protein complexes, protein–ligand complexes, and APO (single-chain) simulations. It provides 12 publication-ready analyses with automated AI-powered PDF reports.
 
 - **Streamlit web app** — run locally or deploy on [Databricks Apps](https://docs.databricks.com/en/dev-tools/databricks-apps/index.html)
 - **Google Colab notebook** — zero-install, run directly in the browser
@@ -32,8 +32,12 @@
 
 ## Features
 
-- **Holo & APO modes** — peptide–protein complex or single-chain (protein-only / peptide-only)
+- **Three system modes**:
+  - **Holo (Peptide + Protein)** — peptide–protein complex with auto chain detection
+  - **Holo (Protein + Ligand)** — protein–small molecule complex (user specifies ligand residue name)
+  - **APO** — single-chain simulation (protein-only / peptide-only)
 - **Auto chain detection** — by chainID or residue ID gaps (smallest chain = peptide)
+- **Ligand mode** — separates protein and ligand by residue name (e.g., LIG, MOL, JZ4); uses heavy atoms for ligand RMSF/eRMSF
 - **12 analyses** with publication-quality plots at 200 dpi + CSV data export
 - **Multi-replica** — per-replica results + combined mean ± std analysis
 - **AI PDF reports** — 6 providers, 20+ models, markdown-aware rendering with plot embedding
@@ -44,20 +48,28 @@
 
 ## Analyses
 
-| # | Analysis | Description | APO | Holo |
-|---|----------|-------------|:---:|:----:|
-| 1 | **3D Visualization** | Trajectory snapshots, COM trace (3D + XY), conformational overlay | ✓ | ✓ |
-| 2 | **RMSD** | Root Mean Square Deviation over time | ✓ | ✓ |
-| 3 | **RMSF** | Root Mean Square Fluctuation per residue (with shadow fill) | ✓ | ✓ |
-| 4 | **Radius of Gyration** | Compactness over time (Protein / Peptide / Complex) | ✓ | ✓ |
-| 5 | **PCA** | Principal Component Analysis (PC1–PC2 scatter, colored by time) | ✓ | ✓ |
-| 6 | **DSSP** | Secondary structure evolution (Helix / Strand / Coil heatmaps) | ✓ | ✓ |
-| 7 | **Distance** | Peptide–Protein center-of-mass distance | — | ✓ |
-| 8 | **Contact** | Residue contacts frequency + timeline heatmap | — | ✓ |
-| 9 | **ProLIF** | Interaction fingerprints (H-bond, hydrophobic, π-stacking, etc.) | — | ✓ |
-| 10 | **eRMSF** | Ensemble RMSF heatmap (ermsfkit) with boundary line | ✓ | ✓ |
-| 11 | **Free Energy Landscape** | 2D FEL (RMSD vs Rg) + representative frame PDB extraction | ✓ | ✓ |
-| 12 | **Interaction Energy** | Coulomb + Lennard-Jones (accurate with parmed or simplified MM) | — | ✓ |
+| # | Analysis | Description | APO | Holo (Peptide) | Holo (Ligand) |
+|---|----------|-------------|:---:|:--------------:|:-------------:|
+| 1 | **3D Visualization** | Trajectory snapshots, COM trace (3D + XY), conformational overlay | ✓ | ✓ | ✓ |
+| 2 | **RMSD** | Root Mean Square Deviation over time | ✓ | ✓ | ✓ |
+| 3 | **RMSF** | Root Mean Square Fluctuation per residue/atom (with shadow fill) | ✓ | ✓ | ✓ |
+| 4 | **Radius of Gyration** | Compactness over time (Protein / Peptide or Ligand / Complex) | ✓ | ✓ | ✓ |
+| 5 | **PCA** | Principal Component Analysis (PC1–PC2 scatter, colored by time) | ✓ | ✓ | ✓ |
+| 6 | **DSSP** | Secondary structure evolution (Helix / Strand / Coil heatmaps) | ✓ | ✓ | ✓ (protein only) |
+| 7 | **Distance** | Peptide/Ligand–Protein center-of-mass distance | — | ✓ | ✓ |
+| 8 | **Contact** | Residue contacts frequency + timeline heatmap | — | ✓ | ✓ |
+| 9 | **ProLIF** | Interaction fingerprints (H-bond, hydrophobic, π-stacking, etc.) | — | ✓ | ✓ |
+| 10 | **eRMSF** | Ensemble RMSF heatmap (ermsfkit) with boundary line | ✓ | ✓ | ✓ |
+| 11 | **Free Energy Landscape** | 2D FEL (RMSD vs Rg) + representative frame PDB extraction | ✓ | ✓ | ✓ |
+| 12 | **Interaction Energy** | Coulomb + Lennard-Jones (accurate with parmed or simplified MM) | — | ✓ | ✓ |
+
+### Protein–Ligand Mode Notes
+
+- **RMSF**: Per-atom RMSF for ligand heavy atoms (multiple atoms per residue); per-residue (CA) for protein
+- **DSSP**: Protein-only (ligand has no secondary structure)
+- **eRMSF**: Per-atom for ligand; boundary line positioned between protein and ligand
+- **ProLIF**: Selects ligand directly by residue name for interaction fingerprinting
+- **Contact/Distance/Energy**: All use ligand atoms vs protein atoms
 
 ---
 
@@ -76,7 +88,6 @@ conda activate pip_env
 conda install -c conda-forge mdanalysis mdtraj rdkit prolif
 
 # Install Python dependencies
-pip install git+https://github.com/pablo-arantes/ermsfkit.git
 pip install -r requirements.txt
 
 # Run
@@ -116,7 +127,10 @@ Open `PepIntProt_Colab.ipynb` in Google Colab — all dependencies are installed
 
 ### Workflow
 
-1. Select system type: **Holo** (peptide + protein) or **APO** (protein-only / peptide-only)
+1. Select system type:
+   - **Holo (Peptide + Protein)** — peptide–protein complex with auto chain detection
+   - **Holo (Protein + Ligand)** — protein–small molecule complex (enter ligand residue name, e.g., LIG, MOL, JZ4)
+   - **APO Protein** or **APO Peptide** — single-chain simulation
 2. Define number of replicas (1–10)
 3. Upload topology PDB (shared) + per-replica trajectories
 4. Configure analysis parameters (cutoffs, temperature, etc.)
@@ -195,7 +209,7 @@ The `PepIntProt_Colab.ipynb` notebook provides the same analyses in a Google Col
 
 ```
 PepIntProt/
-├── app.py                    # Main Streamlit application (3400+ lines)
+├── app.py                    # Main Streamlit application (3500+ lines)
 ├── app.yaml                  # Databricks Apps deployment config
 ├── requirements.txt          # Python dependencies
 ├── logov1.png                # PepIntProt logo
@@ -250,5 +264,5 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 <p align="center">
   <img src="logov1.png" alt="PepIntProt" width="80">
   <br>
-  <i>PepIntProt (PIP) v4.0 — Peptide–Protein Interaction Profiler</i>
+  <i>PepIntProt (PIP) v4.0 — Peptide–Protein & Protein–Ligand Interaction Profiler</i>
 </p>
