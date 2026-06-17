@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logov1.png" alt="PepIntProt Logo" width="180">
+  <img src="logov1.png" alt="PepIntProt Logo" width="300">
 </p>
 
 <h1 align="center">PepIntProt (PIP) v4.0</h1>
