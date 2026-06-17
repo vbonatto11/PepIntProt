@@ -1,7 +1,7 @@
 # PepIntProt (PIP) v4.0
 
 <p align="center">
-  <img src="assets/logov1.png" alt="PepIntProt Logo" width="180">
+  <img src="assets/logov1.png" alt="PepIntProt Logo" width="600">
 </p>
 
 **Peptide–Protein & Protein–Ligand Interaction Profiler from Molecular Dynamics Simulations**
