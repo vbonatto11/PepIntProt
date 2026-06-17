@@ -17,6 +17,8 @@
   <a href="#license">License</a>
 </p>
 
+[![Documentation Status](https://readthedocs.org/projects/pepintprot/badge/?version=latest)](https://pepintprot.readthedocs.io/en/latest/?badge=latest)
+
 ---
 
 ## Overview
