@@ -267,5 +267,5 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 <p align="center">
   <img src="logov1.png" alt="PepIntProt" width="80">
   <br>
-  <i>PepIntProt (PIP) v4.0 — Peptide–Protein & Protein–Ligand Interaction Profiler</i>
+  <i>PepIntProt (PIP) — Peptide–Protein & Protein–Ligand Interaction Profiler</i>
 </p>
