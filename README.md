@@ -5,7 +5,7 @@
 <h1 align="center">PepIntProt (PIP)</h1>
 
 <p align="center">
-  <b>Peptide–Protein & Protein–Ligand Interaction Profiler from Molecular Dynamics Simulations</b>
+  <b>Peptide–Protein, Protein-Protein & Protein–Ligand Interaction Profiler from Molecular Dynamics Simulations</b>
 </p>
 
 <p align="center">
